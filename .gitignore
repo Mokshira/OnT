@@ -1,0 +1,31 @@
+# Python 缓存与构建产物
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 测试与工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 打包产物
+build/
+dist/
+*.spec
+
+# 本地运行配置（可能包含 API Key）
+src/config.json
+
+# IDE 与系统文件
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

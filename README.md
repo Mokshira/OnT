@@ -171,14 +171,3 @@ config.json
 - 全局刷新快捷键；
 - 悬浮翻译展示区样式。
 
-## 开发注意事项
-
-- 本项目主要面向 Windows；全局快捷键依赖 Win32 API。
-- GUI 有「零变更」约束：修改逻辑时不要随意调整布局、尺寸、颜色、按钮文案、菜单结构。
-- `qimage_to_pil_image()` 是公共 API，截图与剪贴板图片处理应统一调用它完成图像转换。
-- `clone_api_config()` 是公共 API，用于复制 `ApiConfig`，避免重复实现克隆逻辑。
-- 中文全角引号 `“”` 在 Python 字符串中是安全的，不要误替换成 ASCII 引号。
-- 应用退出与资源清理由 `shutdown_application()` 统一处理，不要重新添加不可靠的 `__del__` 清理逻辑。
-- `config.json` 可能包含 API Key，提交代码前请确认不会泄露敏感配置。
-
-
