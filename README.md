@@ -57,9 +57,9 @@ OnT/
 │   ├── screenshot_tool.py  # 屏幕框选与截图
 │   └── ...
 ├── assets/                 # 图标等静态资源
-├── config.json             # 本地配置（不提交到 Git）
+├── config.json             # 配置文件
 ├── requirements.txt
-└── .venv/                  # 项目虚拟环境（不提交到 Git）
+└── .venv/                  # 项目虚拟环境
 ```
 
 ## 快速开始
