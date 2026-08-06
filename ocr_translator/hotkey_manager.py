@@ -28,23 +28,57 @@ class GlobalHotkeyManager(QAbstractNativeEventFilter):
 
         return False, 0
 
-    def register_shortcut(self, shortcut_text: str) -> None:
-        self.unregister_shortcut()
+    @property
+    def current_shortcut(self) -> str:
+        return self._current_shortcut
 
+    def register_shortcut(self, shortcut_text: str) -> None:
+        """
+        事务性切换全局快捷键。
+
+        先完成格式解析，再注销旧快捷键并尝试注册新快捷键；如果注册失败，
+        会立即恢复旧快捷键，避免应用进入“没有可用快捷键”的状态。
+        """
         normalized = self._normalize_shortcut_text(shortcut_text)
         if not normalized:
+            raise ValueError("快捷键不能为空。")
+
+        # 在动旧注册前先完成全部格式验证。
+        modifier, vk = self._parse_qt_shortcut(normalized)
+        if self._registered and normalized == self._current_shortcut:
             return
 
-        modifier, vk = self._parse_qt_shortcut(normalized)
+        old_shortcut = self._current_shortcut if self._registered else ""
+        self.unregister_shortcut()
+
         user32 = ctypes.windll.user32
         success = user32.RegisterHotKey(None, self.HOTKEY_ID, modifier, vk)
-        if not success:
-            raise RuntimeError(
-                f"全局快捷键注册失败：{normalized}。该快捷键可能已被其他程序占用。"
-            )
+        if success:
+            self._registered = True
+            self._current_shortcut = normalized
+            return
 
-        self._registered = True
-        self._current_shortcut = normalized
+        restore_error = ""
+        if old_shortcut:
+            try:
+                old_modifier, old_vk = self._parse_qt_shortcut(old_shortcut)
+                restored = user32.RegisterHotKey(
+                    None,
+                    self.HOTKEY_ID,
+                    old_modifier,
+                    old_vk,
+                )
+                if restored:
+                    self._registered = True
+                    self._current_shortcut = old_shortcut
+                else:
+                    restore_error = "，且旧快捷键恢复失败"
+            except Exception:
+                restore_error = "，且旧快捷键恢复失败"
+
+        raise RuntimeError(
+            f"全局快捷键注册失败：{normalized}。该快捷键可能已被其他程序占用{restore_error}。"
+        )
 
     def unregister_shortcut(self) -> None:
         if self._registered:

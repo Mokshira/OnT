@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -272,17 +273,28 @@ class ConfigManager:
 
     def save(self, config: AppConfig) -> None:
         """
-        保存配置到本地 JSON 文件。
-        若目录不存在会自动创建。
+        原子保存配置到本地 JSON 文件。
+
+        先在同目录写入临时文件并 flush/fsync，再通过 os.replace 原子替换目标文件；
+        任一步失败都保留原配置文件，避免产生半写入或截断的 config.json。
         """
+        temp_path = self.config_path.with_name(f".{self.config_path.name}.tmp")
         try:
             config.ensure_valid_state()
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            self.config_path.write_text(
-                json.dumps(asdict(config), ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            serialized = json.dumps(asdict(config), ensure_ascii=False, indent=2)
+
+            with temp_path.open("w", encoding="utf-8", newline="\n") as file:
+                file.write(serialized)
+                file.flush()
+                os.fsync(file.fileno())
+
+            os.replace(temp_path, self.config_path)
         except OSError as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
             raise RuntimeError(f"保存配置失败：{exc}") from exc
 
     @classmethod

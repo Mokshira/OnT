@@ -159,15 +159,17 @@ class AppController(QObject):
         )
 
     def _setup_shortcuts(self, shortcut_text: str) -> None:
+        """注册或切换全局快捷键；管理器内部保证失败时恢复旧注册。"""
         app = QApplication.instance()
         if app is not None:
             app.removeNativeEventFilter(self._global_hotkey_manager)
 
-        self._global_hotkey_manager.unregister_shortcut()
-        self._global_hotkey_manager.register_shortcut(shortcut_text)
-
-        if app is not None:
-            app.installNativeEventFilter(self._global_hotkey_manager)
+        try:
+            self._global_hotkey_manager.register_shortcut(shortcut_text)
+        finally:
+            # 即使注册失败，也要恢复 native event filter；旧快捷键可能已被回滚。
+            if app is not None:
+                app.installNativeEventFilter(self._global_hotkey_manager)
 
     def _load_initial_config(self) -> None:
         config = self.config_manager.load()
@@ -215,12 +217,59 @@ class AppController(QObject):
         return config
 
     def save_config(self) -> None:
+        """
+        事务性保存配置：
+        1. 构建并验证新配置（不写盘）；
+        2. 尝试注册新快捷键；
+        3. 注册成功后才保存配置；
+        4. 任一步失败都恢复旧快捷键、旧磁盘配置和旧界面配置。
+        """
+        old_config = self.config_manager.load()
+        old_shortcut = self._global_hotkey_manager.current_shortcut
+        shortcut_changed = False
+
         try:
-            config = self._validate_and_persist_config(allow_empty_api_for_save=True)
-            self._setup_shortcuts(config.refresh_shortcut)
+            new_config = self._build_config_from_ui()
+            self._validate_config(new_config, allow_empty_api_for_save=True)
+
+            normalized_new_shortcut = GlobalHotkeyManager._normalize_shortcut_text(
+                new_config.refresh_shortcut
+            )
+            normalized_old_shortcut = GlobalHotkeyManager._normalize_shortcut_text(
+                old_shortcut or old_config.refresh_shortcut
+            )
+
+            if normalized_new_shortcut != normalized_old_shortcut:
+                self._setup_shortcuts(normalized_new_shortcut)
+                shortcut_changed = True
+
+            # 快捷键已切换成功，此时才允许写盘。
+            self.config_manager.save(new_config)
+            self.main_window.set_config(new_config)
+            self.floating_window.apply_appearance_config(new_config)
             self._show_info("保存成功", "OCR 与翻译配置已成功保存到本地。")
         except Exception as exc:
-            self._show_error("保存失败", str(exc))
+            rollback_errors: list[str] = []
+
+            if shortcut_changed:
+                try:
+                    self._setup_shortcuts(normalized_old_shortcut)
+                except Exception as rollback_exc:
+                    rollback_errors.append(f"旧快捷键恢复失败：{rollback_exc}")
+
+            # ConfigManager.save 使用原子替换；失败时磁盘旧配置仍在。
+            # 这里重新加载磁盘配置，避免回滚时使用已变更的内存对象。
+            try:
+                restored_config = self.config_manager.load()
+                self.main_window.set_config(restored_config)
+                self.floating_window.apply_appearance_config(restored_config)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"旧界面配置恢复失败：{rollback_exc}")
+
+            detail = str(exc)
+            if rollback_errors:
+                detail = f"{detail}\n\n" + "\n".join(rollback_errors)
+            self._show_error("保存失败", detail)
 
     def create_api_profile(self) -> None:
         try:
