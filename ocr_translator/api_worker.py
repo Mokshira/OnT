@@ -6,7 +6,7 @@ from typing import Any, Callable, Optional
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from config_manager import ApiConfig
+from .config_manager import ApiConfig
 
 
 class ApiWorker(QObject):

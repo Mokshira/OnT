@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QWidgetAction,
 )
 
-from config_manager import AppConfig
+from .config_manager import AppConfig
 
 
 class FloatingSubtitleWindow(QWidget):

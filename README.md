@@ -35,10 +35,32 @@ Pillow>=10.3.0
 在项目根目录运行：
 
 ```bash
-python main.py
+.venv\Scripts\python.exe main.py
 ```
 
-或解压 `Releases` 的文件后直接运行
+项目使用根目录的 `.venv` 作为开发与测试虚拟环境。
+
+或解压 `Releases` 的文件后直接运行。
+
+## 项目结构
+
+```text
+OnT/
+├── main.py                 # 应用启动入口
+├── ocr_translator/         # 应用源码包
+│   ├── app_controller.py   # 主流程与窗口协调
+│   ├── api_worker.py       # API 调用与 SSE 解析
+│   ├── api_utils.py        # API URL / 模型列表工具
+│   ├── config_manager.py   # 配置数据与持久化
+│   ├── floating_window.py  # 悬浮翻译窗口
+│   ├── main_window.py      # 主窗口
+│   ├── screenshot_tool.py  # 屏幕框选与截图
+│   └── ...
+├── assets/                 # 图标等静态资源
+├── config.json             # 本地配置（不提交到 Git）
+├── requirements.txt
+└── .venv/                  # 项目虚拟环境（不提交到 Git）
+```
 
 ## 快速开始
 
@@ -156,7 +178,7 @@ config.json
 
 配置保存位置：
 
-- **开发环境**：`src/config.json`，即 `config_manager.py` 同级目录。
+- **开发环境**：项目根目录下的 `config.json`。
 - **打包环境**：exe 所在目录下的 `config.json`。
 
 配置内容包括：

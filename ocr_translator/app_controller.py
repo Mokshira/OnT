@@ -11,9 +11,9 @@ from PyQt6.QtCore import QObject, QRect, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QIcon, QKeySequence, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
-from api_utils import extract_model_names, normalize_base_url, normalize_models_url
-from api_worker import ApiWorker
-from config_manager import (
+from .api_utils import extract_model_names, normalize_base_url, normalize_models_url
+from .api_worker import ApiWorker
+from .config_manager import (
     ApiConfig,
     AppConfig,
     ConfigManager,
@@ -21,11 +21,11 @@ from config_manager import (
     DEFAULT_REFRESH_SHORTCUT,
     DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
 )
-from floating_window import FloatingSubtitleWindow
-from hotkey_manager import GlobalHotkeyManager
-from image_utils import image_to_base64, qimage_to_pil_image
-from main_window import MainWindow
-from screenshot_tool import (
+from .floating_window import FloatingSubtitleWindow
+from .hotkey_manager import GlobalHotkeyManager
+from .image_utils import image_to_base64, qimage_to_pil_image
+from .main_window import MainWindow
+from .screenshot_tool import (
     CaptureResult,
     ScreenCaptureOverlay,
     SelectionFrameOverlay,
@@ -799,7 +799,9 @@ class AppController(QObject):
             if isinstance(meipass, str) and meipass:
                 dirs.append(Path(meipass))
         else:
-            dirs.append(Path(__file__).resolve().parent)
+            package_dir = Path(__file__).resolve().parent
+            dirs.append(package_dir.parent / "assets")
+            dirs.append(package_dir.parent)
 
         dirs.append(Path.cwd())
 

@@ -21,7 +21,7 @@ dist/
 *.spec
 
 # 本地运行配置（可能包含 API Key）
-src/config.json
+config.json
 
 # IDE 与系统文件
 .vscode/

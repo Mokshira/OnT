@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from config_manager import (
+from .config_manager import (
     ApiConfig,
     AppConfig,
     DEFAULT_API_PROFILE_NAME,
@@ -26,7 +26,7 @@ from config_manager import (
     DEFAULT_REFRESH_SHORTCUT,
     DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
 )
-from ui_widgets import ShortcutCaptureEdit, StyledComboBox
+from .ui_widgets import ShortcutCaptureEdit, StyledComboBox
 
 
 class MainWindow(QMainWindow):
