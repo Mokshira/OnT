@@ -6,7 +6,15 @@ from pathlib import Path
 from typing import Optional
 
 from PIL import Image
-from PyQt6.QtCore import QObject, QRect, QThread, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QObject,
+    QRect,
+    QThread,
+    QTimer,
+    Qt,
+    pyqtSignal,
+    pyqtSlot,
+)
 from PyQt6.QtGui import QGuiApplication, QIcon, QKeySequence, QPixmap
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -61,6 +69,7 @@ class AppController(QObject):
 
         self._global_hotkey_manager = GlobalHotkeyManager(self.refresh_last_capture)
         self._is_quitting = False
+        self._quit_scheduled = False
         self._tray_icon: Optional[QSystemTrayIcon] = None
         self._tray_menu: Optional[QMenu] = None
         self._has_shown_tray_minimize_tip = False
@@ -303,6 +312,8 @@ class AppController(QObject):
 
     def fetch_models(self) -> None:
         """在专用后台线程中拉取当前 Profile 的模型列表。"""
+        if self._is_quitting:
+            return
         if self._models_fetch_thread is not None:
             return
 
@@ -339,9 +350,12 @@ class AppController(QObject):
             worker.succeeded.connect(self.on_models_fetch_success)
             worker.failed.connect(self.on_models_fetch_error)
             worker.cancelled.connect(self.on_models_fetch_cancelled)
-            worker.finished.connect(worker.deleteLater)
+            # ModelsFetchWorker 在最外层 finally 发出 finished，驱动线程退出。
             worker.finished.connect(thread.quit)
-            thread.finished.connect(self._cleanup_models_fetch)
+            # 统一释放顺序：worker.deleteLater、控制器清理、thread.deleteLater。
+            thread.finished.connect(worker.deleteLater)
+            thread.finished.connect(self._on_models_fetch_thread_finished)
+            thread.finished.connect(thread.deleteLater)
 
             self.main_window.set_models_fetching(True)
             thread.start()
@@ -359,6 +373,8 @@ class AppController(QObject):
         worker.cancel()
 
     def on_models_fetch_success(self, model_names: list[str]) -> None:
+        if self._is_quitting:
+            return
         current_model = self._models_fetch_current_model
         self.main_window.model_name_combo.clear()
         self.main_window.model_name_combo.addItems(model_names)
@@ -375,27 +391,38 @@ class AppController(QObject):
         )
 
     def on_models_fetch_error(self, message: str) -> None:
+        if self._is_quitting:
+            return
         self._show_error("获取模型失败", message)
 
     def on_models_fetch_cancelled(self) -> None:
+        if self._is_quitting:
+            return
         self._show_info("已取消", "已取消模型列表拉取。")
 
     def _reset_models_fetch_ui(self) -> None:
         self.main_window.set_models_fetching(False)
 
-    def _cleanup_models_fetch(self) -> None:
-        thread = self._models_fetch_thread
-        worker = self._models_fetch_worker
+    @pyqtSlot()
+    def _on_models_fetch_thread_finished(self) -> None:
+        thread = self.sender()
+        if isinstance(thread, QThread):
+            self._cleanup_models_fetch(thread)
+
+    def _cleanup_models_fetch(self, expected_thread: QThread) -> None:
+        if self._models_fetch_thread is not expected_thread:
+            return
 
         self._models_fetch_thread = None
         self._models_fetch_worker = None
         self._models_fetch_role = None
         self._models_fetch_current_model = ""
         self._models_fetch_url = ""
-        self._reset_models_fetch_ui()
 
-        if thread is not None:
-            thread.deleteLater()
+        if not self._is_quitting:
+            self._reset_models_fetch_ui()
+
+        self._maybe_finish_shutdown()
 
     def start_capture(self) -> None:
         try:
@@ -470,15 +497,59 @@ class AppController(QObject):
     def _has_active_requests(self) -> bool:
         return bool(self._request_threads)
 
-    def _cleanup_request(self, request_kind: str) -> None:
-        thread = self._request_threads.pop(request_kind, None)
-        worker = self._request_workers.pop(request_kind, None)
+    def _cleanup_request(self, request_kind: str, expected_thread: QThread) -> None:
+        """
+        仅做注册表清理：只有当前注册的线程与完成线程身份一致时才移除，
+        防止迟到的 thread.finished 清掉未来同名的新任务。
+        Worker / 线程的删除统一由 thread.finished 连接完成，这里不再手动删除。
+        """
+        if self._request_threads.get(request_kind) is not expected_thread:
+            return
 
-        if worker is not None:
-            worker.deleteLater()
+        self._request_threads.pop(request_kind, None)
+        self._request_workers.pop(request_kind, None)
+        self._maybe_finish_shutdown()
 
-        if thread is not None:
-            thread.deleteLater()
+    def _find_request_kind_for_worker(self, worker: object) -> Optional[str]:
+        for kind, registered_worker in self._request_workers.items():
+            if registered_worker is worker:
+                return kind
+        return None
+
+    @pyqtSlot(str)
+    def _on_api_partial_text(self, text: str) -> None:
+        worker = self.sender()
+        kind = self._find_request_kind_for_worker(worker)
+        if kind is None:
+            return
+        self.on_api_partial_text(kind, text)
+
+    @pyqtSlot(str)
+    def _on_api_success(self, text: str) -> None:
+        worker = self.sender()
+        kind = self._find_request_kind_for_worker(worker)
+        if kind is None:
+            return
+        self.on_api_success(kind, text)
+
+    @pyqtSlot(str)
+    def _on_api_error(self, message: str) -> None:
+        worker = self.sender()
+        kind = self._find_request_kind_for_worker(worker)
+        if kind is None:
+            return
+        self.on_api_error(kind, message)
+
+    @pyqtSlot()
+    def _on_request_thread_finished(self) -> None:
+        thread = self.sender()
+        if not isinstance(thread, QThread):
+            return
+
+        for kind, registered_thread in list(self._request_threads.items()):
+            if registered_thread is thread:
+                self._cleanup_request(kind, thread)
+                return
 
     def _process_capture_result(self, result: CaptureResult) -> None:
         self._current_capture = result
@@ -584,6 +655,14 @@ class AppController(QObject):
         self.shutdown_application()
 
     def shutdown_application(self) -> None:
+        """
+        开始两阶段退出（异步阶段）：
+        1. 置 quitting，拒绝新任务；
+        2. 隐藏托盘、注销全局快捷键；
+        3. 协作取消所有 Worker 的网络 I/O；
+        4. 对全部受管线程 requestInterruption + quit；
+        5. 关闭辅助窗口，然后交由 _maybe_finish_shutdown 决定何时真正退出。
+        """
         if self._is_quitting:
             return
 
@@ -600,7 +679,21 @@ class AppController(QObject):
         except Exception:
             pass
 
-        self.cancel_fetch_models()
+        # 协作取消：直接调用线程安全的幂等 cancel()，尽快打断网络读取。
+        models_worker = self._models_fetch_worker
+        if models_worker is not None:
+            models_worker.cancel()
+        for worker in list(self._request_workers.values()):
+            worker.cancel()
+
+        # requestInterruption 是诊断友好的协作提示；quit 退出线程事件循环。
+        # 两者都不能替代 Worker 的 HTTP 取消。
+        for thread in list(self._request_threads.values()):
+            thread.requestInterruption()
+            thread.quit()
+        if self._models_fetch_thread is not None:
+            self._models_fetch_thread.requestInterruption()
+            self._models_fetch_thread.quit()
 
         for widget in (
             self.floating_window,
@@ -612,9 +705,57 @@ class AppController(QObject):
             except Exception:
                 pass
 
+        self._maybe_finish_shutdown()
+
+    def _maybe_finish_shutdown(self) -> None:
+        """
+        只有满足以下全部条件才允许调度 QApplication.quit()：
+        - 正在退出；
+        - 请求线程注册表为空；
+        - 模型列表线程为空；
+        - 尚未调度过退出。
+        调度时用 QTimer.singleShot(0, app.quit) 让当前一轮清理和
+        deferred delete 有机会回到事件循环。
+        """
+        if not self._is_quitting or self._quit_scheduled:
+            return
+        if self._request_threads:
+            return
+        if self._models_fetch_thread is not None:
+            return
+
+        self._quit_scheduled = True
         app = QApplication.instance()
         if app is not None:
-            app.quit()
+            QTimer.singleShot(0, app.quit)
+
+    def finalize_threads(self) -> None:
+        """
+        同步最终保护：仅供 main.py 的 finally 调用，不得显示 UI。
+
+        正常托盘退出时异步阶段已排空，此方法应快速空操作；
+        若事件循环因异常或其他原因提前返回，这里兜底执行
+        cancel + quit + wait，绝不销毁仍运行的线程。
+        """
+        self._is_quitting = True
+
+        models_worker = self._models_fetch_worker
+        if models_worker is not None:
+            models_worker.cancel()
+        for worker in list(self._request_workers.values()):
+            worker.cancel()
+
+        threads: list[QThread] = []
+        if self._models_fetch_thread is not None:
+            threads.append(self._models_fetch_thread)
+        threads.extend(list(self._request_threads.values()))
+
+        for thread in threads:
+            thread.requestInterruption()
+            thread.quit()
+
+        for thread in threads:
+            thread.wait()
 
     def on_clipboard_monitor_toggled(self, checked: bool) -> None:
         if checked:
@@ -729,10 +870,12 @@ class AppController(QObject):
         image_base64: str | None = None,
         text_input: str | None = None,
     ) -> None:
+        if self._is_quitting:
+            return
         if request_kind in self._request_threads:
             return
 
-        thread = QThread()
+        thread = QThread(self)
         worker = ApiWorker(
             api_config,
             prompt,
@@ -744,24 +887,24 @@ class AppController(QObject):
         self._request_threads[request_kind] = thread
         self._request_workers[request_kind] = worker
 
+        # 全部连接必须在 thread.start() 前完成。
         thread.started.connect(worker.run)
-        worker.partial_text.connect(
-            lambda text, kind=request_kind: self.on_api_partial_text(kind, text)
-        )
-        worker.finished.connect(
-            lambda text, kind=request_kind: self.on_api_success(kind, text)
-        )
-        worker.error.connect(
-            lambda message, kind=request_kind: self.on_api_error(kind, message)
-        )
-        worker.finished.connect(thread.quit)
-        worker.error.connect(thread.quit)
-        thread.finished.connect(
-            lambda kind=request_kind: self._cleanup_request(kind)
-        )
+        # 三类业务信号通过绑定在控制器上的代理 slot 转发（sender 身份查找），
+        # Qt 会以 AutoConnection 将调用排队到控制器所在的主线程。
+        worker.partial_text.connect(self._on_api_partial_text)
+        worker.finished.connect(self._on_api_success)
+        worker.error.connect(self._on_api_error)
+        # 唯一的生命周期终止信号是 done，驱动线程退出。
+        worker.done.connect(thread.quit)
+        # 统一释放顺序：worker.deleteLater、控制器清理、thread.deleteLater。
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_request_thread_finished)
+        thread.finished.connect(thread.deleteLater)
         thread.start()
 
     def on_api_partial_text(self, request_kind: str, text: str) -> None:
+        if self._is_quitting:
+            return
         preview_text = text.strip()
         if request_kind == "ocr":
             self.main_window.update_ocr_result(
@@ -773,6 +916,8 @@ class AppController(QObject):
             self.floating_window.set_text(preview_text or "正在翻译，请稍候...")
 
     def on_api_success(self, request_kind: str, text: str) -> None:
+        if self._is_quitting:
+            return
         if request_kind == "ocr":
             self.main_window.update_ocr_result(text)
             return
@@ -781,6 +926,8 @@ class AppController(QObject):
             self.floating_window.set_text(text)
 
     def on_api_error(self, request_kind: str, message: str) -> None:
+        if self._is_quitting:
+            return
         if request_kind == "ocr":
             self.main_window.update_ocr_result("OCR 识别失败。")
             self._show_error("OCR 识别失败", message)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Callable, Optional
 
 import requests
@@ -14,11 +15,17 @@ class ApiWorker(QObject):
     通用 API 调用工作对象：
     - OCR：图片 + OCR Prompt
     - 翻译：文本 + 翻译 Prompt
+
+    生命周期约定：
+    - `finished(str)` 只表示业务成功结果；
+    - `done()` 在 run() 的最外层 finally 发出，每次运行恰好一次；
+    - `cancel()` 线程安全且幂等，可打断阻塞中的网络读取。
     """
 
     partial_text = pyqtSignal(str)
     finished = pyqtSignal(str)
     error = pyqtSignal(str)
+    done = pyqtSignal()
 
     def __init__(
         self,
@@ -34,8 +41,67 @@ class ApiWorker(QObject):
         self.image_base64 = image_base64
         self.text_input = text_input
 
+        self._cancelled = threading.Event()
+        self._http_lock = threading.Lock()
+        self._session: requests.Session | None = None
+        self._response: requests.Response | None = None
+
+    def cancel(self) -> None:
+        """
+        协作取消当前请求。
+
+        先设置取消标志，再关闭活动的 Response / Session，尽快打断
+        iter_lines() 与网络读取。可重复调用，任何一次都不抛异常。
+        """
+        self._cancelled.set()
+
+        with self._http_lock:
+            response = self._response
+            session = self._session
+
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+    def _set_active_handles(
+        self,
+        session: requests.Session | None,
+        response: requests.Response | None,
+    ) -> None:
+        with self._http_lock:
+            self._session = session
+            self._response = response
+
+    def _close_active_handles(self) -> None:
+        with self._http_lock:
+            response = self._response
+            session = self._session
+            self._response = None
+            self._session = None
+
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
     def run(self) -> None:
         try:
+            if self._cancelled.is_set():
+                return
+
             payload = self._build_payload(
                 model_name=self.api_config.model_name,
                 prompt=self.prompt,
@@ -44,35 +110,68 @@ class ApiWorker(QObject):
             )
             headers = self._build_headers()
 
-            response = requests.post(
-                self.api_config.base_url,
-                headers=headers,
-                json=payload,
-                timeout=60,
-                stream=True,
-            )
+            session = requests.Session()
+            # 处理“cancel() 与句柄赋值并发”的窗口：
+            # 赋值后立即复查取消标志，若已取消则直接进入收尾。
+            self._set_active_handles(session, None)
+
+            response: requests.Response | None = None
+            if not self._cancelled.is_set():
+                response = session.post(
+                    self.api_config.base_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=60,
+                    stream=True,
+                )
+                self._set_active_handles(session, response)
+
+            if self._cancelled.is_set():
+                return
+            if response is None:
+                return
+
             response.raise_for_status()
+
+            if self._cancelled.is_set():
+                return
 
             result_text = self._extract_response_text(
                 response,
                 progress_callback=self.partial_text.emit,
+                should_cancel=self._cancelled.is_set,
             )
+
+            if self._cancelled.is_set():
+                return
+
             if not result_text.strip():
                 raise ValueError("接口返回成功，但未解析到有效文本内容。")
+
+            if self._cancelled.is_set():
+                return
 
             self.finished.emit(result_text.strip())
 
         except requests.exceptions.Timeout:
-            self.error.emit("请求超时，请检查网络状态或稍后重试。")
+            if not self._cancelled.is_set():
+                self.error.emit("请求超时，请检查网络状态或稍后重试。")
         except requests.exceptions.HTTPError as exc:
-            detail = self._extract_error_detail(exc.response)
-            self.error.emit(f"接口请求失败：{detail}")
+            if not self._cancelled.is_set():
+                detail = self._extract_error_detail(exc.response)
+                self.error.emit(f"接口请求失败：{detail}")
         except requests.exceptions.RequestException as exc:
-            self.error.emit(f"网络请求异常：{exc}")
+            if not self._cancelled.is_set():
+                self.error.emit(f"网络请求异常：{exc}")
         except ValueError as exc:
-            self.error.emit(f"数据处理失败：{exc}")
+            if not self._cancelled.is_set():
+                self.error.emit(f"数据处理失败：{exc}")
         except Exception as exc:
-            self.error.emit(f"发生未知错误：{exc}")
+            if not self._cancelled.is_set():
+                self.error.emit(f"发生未知错误：{exc}")
+        finally:
+            self._close_active_handles()
+            self.done.emit()
 
     def _build_headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -132,6 +231,7 @@ class ApiWorker(QObject):
         cls,
         response: requests.Response,
         progress_callback: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> str:
         content_type = response.headers.get("Content-Type", "").lower()
 
@@ -139,6 +239,7 @@ class ApiWorker(QObject):
             streamed_text = cls._extract_text_from_sse(
                 response,
                 progress_callback=progress_callback,
+                should_cancel=should_cancel,
             )
             if streamed_text:
                 return streamed_text
@@ -151,10 +252,13 @@ class ApiWorker(QObject):
         cls,
         response: requests.Response,
         progress_callback: Callable[[str], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> str:
         text_parts: list[str] = []
 
         for raw_line in response.iter_lines(decode_unicode=False):
+            if should_cancel is not None and should_cancel():
+                return ""
             if not raw_line:
                 continue
 
@@ -195,6 +299,8 @@ class ApiWorker(QObject):
                 )
                 if extracted:
                     text_parts.append(extracted)
+                    if should_cancel is not None and should_cancel():
+                        return ""
                     if progress_callback is not None:
                         progress_callback("".join(text_parts))
 

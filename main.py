@@ -24,11 +24,17 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("OCR与翻译助手")
+    # 禁止“最后一个窗口关闭即退出”，避免绕过控制器的异步线程排空。
+    app.setQuitOnLastWindowClosed(False)
 
     controller = AppController()
     app._controller = controller  # type: ignore[attr-defined]
 
-    return app.exec()
+    try:
+        return app.exec()
+    finally:
+        # 无论 app.exec() 因何返回，都同步排空遗留线程。
+        controller.finalize_threads()
 
 
 if __name__ == "__main__":
