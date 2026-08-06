@@ -347,9 +347,16 @@ class MainWindow(QMainWindow):
 
         self.fetch_models_button = QPushButton("拉取模型")
         self.fetch_models_button.setObjectName("SecondaryButton")
+        self.fetch_models_button.setToolTip("后台拉取当前 API 配置的模型列表")
+
+        self.cancel_fetch_models_button = QPushButton("取消")
+        self.cancel_fetch_models_button.setObjectName("SecondaryButton")
+        self.cancel_fetch_models_button.setToolTip("取消正在进行的模型列表拉取")
+        self.cancel_fetch_models_button.hide()
 
         model_row.addWidget(self.model_name_combo, 1)
         model_row.addWidget(self.fetch_models_button)
+        model_row.addWidget(self.cancel_fetch_models_button)
         layout.addLayout(model_row)
 
         self.target_language_label = QLabel("翻译目标语言")
@@ -527,6 +534,21 @@ class MainWindow(QMainWindow):
         layout.addLayout(action_grid)
 
         return card
+
+    def set_models_fetching(self, is_fetching: bool) -> None:
+        """同步模型列表后台请求的按钮与输入控件状态。"""
+        self.fetch_models_button.setEnabled(not is_fetching)
+        self.fetch_models_button.setText("正在拉取…" if is_fetching else "拉取模型")
+        self.cancel_fetch_models_button.setVisible(is_fetching)
+        self.cancel_fetch_models_button.setEnabled(is_fetching)
+        self.cancel_fetch_models_button.setText("取消")
+        self.model_name_combo.setEnabled(not is_fetching)
+
+    def set_models_fetch_cancelling(self) -> None:
+        """取消已发出，保留禁用状态直到后台线程退出。"""
+        self.fetch_models_button.setText("正在取消…")
+        self.cancel_fetch_models_button.setEnabled(False)
+        self.cancel_fetch_models_button.setText("取消中…")
 
     def set_config_drawer_visible(self, is_visible: bool) -> None:
         self._is_config_drawer_open = bool(is_visible)

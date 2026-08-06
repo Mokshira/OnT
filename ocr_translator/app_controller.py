@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-import requests
 from PIL import Image
 from PyQt6.QtCore import QObject, QRect, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QIcon, QKeySequence, QPixmap
@@ -25,6 +24,7 @@ from .floating_window import FloatingSubtitleWindow
 from .hotkey_manager import GlobalHotkeyManager
 from .image_utils import image_to_base64, qimage_to_pil_image
 from .main_window import MainWindow
+from .models_worker import ModelsFetchWorker
 from .screenshot_tool import (
     CaptureResult,
     ScreenCaptureOverlay,
@@ -52,6 +52,11 @@ class AppController(QObject):
         self._selection_frame_visible = True
         self._request_threads: dict[str, QThread] = {}
         self._request_workers: dict[str, ApiWorker] = {}
+        self._models_fetch_thread: Optional[QThread] = None
+        self._models_fetch_worker: Optional[ModelsFetchWorker] = None
+        self._models_fetch_role: Optional[str] = None
+        self._models_fetch_current_model = ""
+        self._models_fetch_url = ""
         self._last_clipboard_image_hash: Optional[str] = None
 
         self._global_hotkey_manager = GlobalHotkeyManager(self.refresh_last_capture)
@@ -113,6 +118,9 @@ class AppController(QObject):
         self.main_window.save_button.clicked.connect(self.save_config)
         self.main_window.capture_button.clicked.connect(self.start_capture)
         self.main_window.fetch_models_button.clicked.connect(self.fetch_models)
+        self.main_window.cancel_fetch_models_button.clicked.connect(
+            self.cancel_fetch_models
+        )
         self.main_window.add_api_profile_button.clicked.connect(self.create_api_profile)
         self.main_window.update_api_profile_button.clicked.connect(
             self.update_api_profile
@@ -245,6 +253,10 @@ class AppController(QObject):
             self._show_error("删除配置失败", str(exc))
 
     def fetch_models(self) -> None:
+        """在专用后台线程中拉取当前 Profile 的模型列表。"""
+        if self._models_fetch_thread is not None:
+            return
+
         try:
             config = self._build_config_from_ui()
             role = self.main_window.get_active_config_role()
@@ -257,7 +269,6 @@ class AppController(QObject):
 
             if not models_url:
                 raise ValueError("Base URL 不能为空。")
-
             if not (
                 models_url.startswith("http://") or models_url.startswith("https://")
             ):
@@ -265,41 +276,77 @@ class AppController(QObject):
                     "Base URL 格式不正确，必须以 http:// 或 https:// 开头。"
                 )
 
-            headers = {"Content-Type": "application/json"}
-            if api_config.api_key:
-                headers["Authorization"] = f"Bearer {api_config.api_key}"
+            thread = QThread(self)
+            worker = ModelsFetchWorker(models_url, api_config.api_key)
+            worker.moveToThread(thread)
 
-            response = requests.get(models_url, headers=headers, timeout=30)
-            response.raise_for_status()
+            self._models_fetch_thread = thread
+            self._models_fetch_worker = worker
+            self._models_fetch_role = role
+            self._models_fetch_current_model = api_config.model_name
+            self._models_fetch_url = models_url
 
-            data = response.json()
-            model_names = extract_model_names(data)
-            if not model_names:
-                raise ValueError("接口返回成功，但未解析到可用模型。")
+            thread.started.connect(worker.run)
+            worker.succeeded.connect(self.on_models_fetch_success)
+            worker.failed.connect(self.on_models_fetch_error)
+            worker.cancelled.connect(self.on_models_fetch_cancelled)
+            worker.finished.connect(worker.deleteLater)
+            worker.finished.connect(thread.quit)
+            thread.finished.connect(self._cleanup_models_fetch)
 
-            current_model = api_config.model_name
-            self.main_window.model_name_combo.clear()
-            self.main_window.model_name_combo.addItems(model_names)
-
-            if current_model and current_model in model_names:
-                self.main_window.model_name_combo.setCurrentText(current_model)
-            else:
-                self.main_window.model_name_combo.setCurrentText(model_names[0])
-
-            role_name = "OCR" if role == "ocr" else "翻译"
-            self._show_info(
-                "获取成功",
-                f"已从 {models_url} 获取到 {len(model_names)} 个{role_name}模型。",
-            )
-        except requests.exceptions.Timeout:
-            self._show_error("获取模型失败", "请求超时，请检查网络状态或稍后重试。")
-        except requests.exceptions.HTTPError as exc:
-            detail = ApiWorker._extract_error_detail(exc.response)
-            self._show_error("获取模型失败", f"接口请求失败：{detail}")
-        except requests.exceptions.RequestException as exc:
-            self._show_error("获取模型失败", f"网络请求异常：{exc}")
+            self.main_window.set_models_fetching(True)
+            thread.start()
         except Exception as exc:
+            self._reset_models_fetch_ui()
             self._show_error("获取模型失败", str(exc))
+
+    def cancel_fetch_models(self) -> None:
+        """取消正在进行的模型拉取，并让后台 Worker 关闭其会话。"""
+        worker = self._models_fetch_worker
+        if worker is None:
+            return
+
+        self.main_window.set_models_fetch_cancelling()
+        worker.cancel()
+
+    def on_models_fetch_success(self, model_names: list[str]) -> None:
+        current_model = self._models_fetch_current_model
+        self.main_window.model_name_combo.clear()
+        self.main_window.model_name_combo.addItems(model_names)
+
+        if current_model and current_model in model_names:
+            self.main_window.model_name_combo.setCurrentText(current_model)
+        else:
+            self.main_window.model_name_combo.setCurrentText(model_names[0])
+
+        role_name = "OCR" if self._models_fetch_role == "ocr" else "翻译"
+        self._show_info(
+            "获取成功",
+            f"已从 {self._models_fetch_url} 获取到 {len(model_names)} 个{role_name}模型。",
+        )
+
+    def on_models_fetch_error(self, message: str) -> None:
+        self._show_error("获取模型失败", message)
+
+    def on_models_fetch_cancelled(self) -> None:
+        self._show_info("已取消", "已取消模型列表拉取。")
+
+    def _reset_models_fetch_ui(self) -> None:
+        self.main_window.set_models_fetching(False)
+
+    def _cleanup_models_fetch(self) -> None:
+        thread = self._models_fetch_thread
+        worker = self._models_fetch_worker
+
+        self._models_fetch_thread = None
+        self._models_fetch_worker = None
+        self._models_fetch_role = None
+        self._models_fetch_current_model = ""
+        self._models_fetch_url = ""
+        self._reset_models_fetch_ui()
+
+        if thread is not None:
+            thread.deleteLater()
 
     def start_capture(self) -> None:
         try:
@@ -503,6 +550,8 @@ class AppController(QObject):
             self._global_hotkey_manager.unregister_shortcut()
         except Exception:
             pass
+
+        self.cancel_fetch_models()
 
         for widget in (
             self.floating_window,
