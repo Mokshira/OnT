@@ -25,7 +25,12 @@ src/config.json
 
 # IDE 与系统文件
 .vscode/
+.workbuddy/
+.codex/
 .idea/
 *.swp
 .DS_Store
 Thumbs.db
+
+gitignore
+.gitignore
