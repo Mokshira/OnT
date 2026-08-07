@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -27,6 +28,7 @@ from .config_manager import (
     DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
 )
 from .ui_widgets import ShortcutCaptureEdit, StyledComboBox
+from .floating_window import render_markdown_preserving_line_breaks
 
 
 class MainWindow(QMainWindow):
@@ -45,6 +47,7 @@ class MainWindow(QMainWindow):
         self._ocr_prompt_template = DEFAULT_OCR_PROMPT_TEMPLATE
         self._translation_prompt_template = DEFAULT_TRANSLATION_PROMPT_TEMPLATE
         self._target_language = "简体中文"
+        self._ocr_result_text = ""
         self._toast_hide_timer = QTimer(self)
         self._toast_hide_timer.setSingleShot(True)
         self._is_config_drawer_open = False
@@ -177,7 +180,7 @@ class MainWindow(QMainWindow):
                 color: #334155;
                 font-size: 13px;
             }
-            QLineEdit, QPlainTextEdit, QComboBox, QKeySequenceEdit {
+            QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QKeySequenceEdit {
                 background: #ffffff;
                 border: 1px solid #cbd5e1;
                 border-radius: 10px;
@@ -185,7 +188,7 @@ class MainWindow(QMainWindow):
                 font-size: 13px;
                 color: #111827;
             }
-            QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QKeySequenceEdit:focus {
+            QLineEdit:focus, QPlainTextEdit:focus, QTextBrowser:focus, QComboBox:focus, QKeySequenceEdit:focus {
                 border: 1px solid #3b82f6;
             }
             QComboBox {
@@ -427,7 +430,7 @@ class MainWindow(QMainWindow):
         ocr_title.setObjectName("SectionTitle")
         ocr_column.addWidget(ocr_title)
 
-        self.ocr_result_output = QPlainTextEdit()
+        self.ocr_result_output = QTextBrowser()
         self.ocr_result_output.setReadOnly(True)
         self.ocr_result_output.setPlaceholderText(
             "截图后的 OCR 结果将在这里显示，可用于提取数学公式或原文。"
@@ -829,13 +832,19 @@ class MainWindow(QMainWindow):
         self._update_translation_enabled_button_text()
 
     def update_ocr_result(self, text: str) -> None:
-        self.ocr_result_output.setPlainText(text.strip())
+        # 保存模型返回的原始纯文本，避免 Markdown 渲染过程中的格式占位符
+        # 影响“复制 OCR 结果”；展示层仍保留 Markdown 与逐行换行。
+        self._ocr_result_text = text.strip()
+        self.ocr_result_output.setMarkdown(
+            render_markdown_preserving_line_breaks(self._ocr_result_text)
+        )
 
     def clear_ocr_result(self) -> None:
+        self._ocr_result_text = ""
         self.ocr_result_output.clear()
 
     def get_ocr_result_text(self) -> str:
-        return self.ocr_result_output.toPlainText().strip()
+        return self._ocr_result_text
 
     def set_config(self, config: AppConfig) -> None:
         config.ensure_valid_state()

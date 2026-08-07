@@ -17,16 +17,33 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMenu,
-    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QSlider,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
     QWidgetAction,
 )
 
 from .config_manager import AppConfig
+
+
+def render_markdown_preserving_line_breaks(text: str) -> str:
+    """
+    将模型输出转换为可保留原始换行结构的 Markdown。
+
+    QTextDocument 的 Markdown 渲染会把单个换行视为软换行并显示为空格。
+    先统一 Windows（CRLF）和旧式 Mac（CR）换行，再把每个 LF 转为
+    Markdown 硬换行（行尾两个空格 + LF），使 OCR 与翻译结果在保留
+    Markdown 排版能力的同时，仍按模型返回的行结构显示。
+    """
+    normalized_text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized_text.split("\n")
+    # Markdown 会直接丢弃完全空白的行；用不换行空格占位可以保留
+    # 对应的空白文本块，视觉上仍是一行空白。
+    rendered_lines = [line if line else "&nbsp;" for line in lines]
+    return "  \n".join(rendered_lines)
 
 
 class FloatingSubtitleWindow(QWidget):
@@ -53,6 +70,7 @@ class FloatingSubtitleWindow(QWidget):
         self._font_color = QColor("white")
         self._background_color = QColor("#000000")
         self._background_opacity = 24
+        self._plain_text = "翻译结果将在这里显示"
         self._is_applying_appearance = False
         self._setup_window()
         self._setup_ui()
@@ -263,15 +281,14 @@ class FloatingSubtitleWindow(QWidget):
 
         self.menu_frame.hide()
 
-        self.text_label = QPlainTextEdit()
-        self.text_label.setPlainText("翻译结果将在这里显示")
+        self.text_label = QTextBrowser()
+        self.text_label.setMarkdown("翻译结果将在这里显示")
         self.text_label.setReadOnly(True)
         self.text_label.setFrameShape(QFrame.Shape.NoFrame)
         self.text_label.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.text_label.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.text_label.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
 
         font = QFont("Microsoft YaHei UI", self._font_size)
         font.setBold(True)
@@ -304,7 +321,12 @@ class FloatingSubtitleWindow(QWidget):
         self._update_background_geometry()
 
     def set_text(self, text: str) -> None:
-        self.text_label.setPlainText(text.strip() or "翻译结果将在这里显示")
+        # 使用 QTextBrowser.setMarkdown 渲染翻译结果，支持 Markdown 排版；
+        # 同时把单个换行转换为 Markdown 硬换行，保留图片中的段落结构；
+        # 状态提示等非 Markdown 纯文本也能原样显示，不受影响。
+        content = text.strip() or "翻译结果将在这里显示"
+        self._plain_text = content
+        self.text_label.setMarkdown(render_markdown_preserving_line_breaks(content))
         self.text_label.verticalScrollBar().setValue(0)
 
     def _emit_appearance_changed(self) -> None:
@@ -421,10 +443,12 @@ class FloatingSubtitleWindow(QWidget):
         self.display_toggle_button.setText("隐藏展示" if is_visible else "显示展示")
 
     def _apply_font_size(self) -> None:
-        font = self.text_label.font()
-        font.setPointSize(self._font_size)
+        font = QFont("Microsoft YaHei UI", self._font_size)
         font.setBold(True)
         self.text_label.setFont(font)
+        # QTextBrowser 的 Markdown 内容以文档形式渲染，
+        # 需要同步更新文档默认字体，正文才会跟随字号设置。
+        self.text_label.document().setDefaultFont(font)
 
     def _apply_background_style(self) -> None:
         panel_alpha = round(self._background_opacity / 100 * 255)
@@ -447,7 +471,7 @@ class FloatingSubtitleWindow(QWidget):
         top_padding = self.menu_frame.sizeHint().height() + 10
         self.text_label.setStyleSheet(
             f"""
-            QPlainTextEdit {{
+            QTextBrowser {{
                 color: {self._font_color.name()};
                 background: transparent;
                 border: none;

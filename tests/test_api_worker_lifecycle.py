@@ -207,6 +207,25 @@ class ApiWorkerLifecycleTest(unittest.TestCase):
         signals.assert_no_business_signals(self)
         self.assertEqual(signals.done_count, 1)
 
+    def test_sse_preserves_chunk_boundary_spaces_and_line_breaks(self) -> None:
+        class FormattingSSE:
+            def iter_lines(self, decode_unicode=False):
+                yield from [
+                    b'data: {"choices": [{"delta": {"content": "first"}}]}',
+                    b'data: {"choices": [{"delta": {"content": " line\\n"}}]}',
+                    b'data: {"choices": [{"delta": {"content": "second line"}}]}',
+                    b"data: [DONE]",
+                ]
+
+        partial: list[str] = []
+        result = ApiWorker._extract_text_from_sse(
+            FormattingSSE(),
+            progress_callback=partial.append,
+        )
+
+        self.assertEqual(result, "first line\nsecond line")
+        self.assertEqual(partial[-1], "first line\nsecond line")
+
     def test_sse_cancel_callback_stops_parsing(self) -> None:
         """验证 should_cancel 回调能停止 SSE 解析并返回。"""
 
