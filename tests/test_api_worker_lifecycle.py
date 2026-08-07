@@ -5,6 +5,7 @@ ApiWorker 生命周期与协作取消测试。
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import unittest
@@ -265,6 +266,68 @@ class ApiWorkerLifecycleTest(unittest.TestCase):
             should_cancel=should_cancel_after_first,
         )
         self.assertEqual(result2, "")
+
+    def test_sse_preserves_script_dialogue_line_structure(self) -> None:
+        """
+        用户样例剧本：1 行旁白 + 1 空白行 + 5 行角色对白 = 7 个逻辑行。
+
+        SSE chunk 故意跨空格与跨换行边界切分（含 \\n\\n 被拆到两个 chunk），
+        最终字符串必须逐字符等于 fixture，且最后一次 partial_text 与最终
+        结果一致，证明解析层不吞行。
+        """
+        script_fixture = (
+            'At dusk, Su Wan blocks the man\'s path, '
+            'her sword held across her chest.\n'
+            '\n'
+            'SU WAN: "Stop. What did you take from the study last night?"\n'
+            'PEI XUZHI (with a soft laugh): "A heart. Might I have it back?"\n'
+            'SU WAN (ears flushing red): "...Smooth talker. '
+            'Don\'t think I won\'t run you through."\n'
+            'PEI XUZHI: "I believe you. So I\'ve already placed '
+            'my heart in your hands."\n'
+            'SU WAN (turning away): "I don\'t want your heart. '
+            'Just return the letter you stole."'
+        )
+
+        # 故意在换行 / 空格 / 空白行边界切分 chunk
+        chunk_texts = [
+            "At dusk, Su Wan blocks the man",
+            "'s path, her sword held across her chest.",
+            "\n",
+            "\nSU WAN: \"Stop. What did you take ",
+            "from the study last night?\"\nPEI XUZHI (with a soft laugh): ",
+            "\"A heart. Might I have it back?\"\n",
+            "SU WAN (ears flushing red): \"...Smooth talker. ",
+            "Don't think I won't run you through.\"\n",
+            "PEI XUZHI: \"I believe you. So I've already placed ",
+            "my heart in your hands.\"\nSU WAN (turning away): ",
+            "\"I don't want your heart. Just return the letter you stole.\"",
+        ]
+        self.assertEqual("".join(chunk_texts), script_fixture)
+
+        class ScriptSSE:
+            def iter_lines(self, decode_unicode=False):
+                for text in chunk_texts:
+                    payload = json.dumps(
+                        {"choices": [{"delta": {"content": text}}]},
+                        ensure_ascii=False,
+                    )
+                    yield f"data: {payload}".encode("utf-8")
+                yield b"data: [DONE]"
+
+        partial: list[str] = []
+        result = ApiWorker._extract_text_from_sse(
+            ScriptSSE(),
+            progress_callback=partial.append,
+        )
+
+        # 7 个逻辑行 = 6 个真实换行，其中连续 \n\n 构成旁白后的 1 个空白行
+        self.assertEqual(result, script_fixture)
+        self.assertEqual(result.count("\n"), 6)
+        self.assertEqual(len(result.split("\n")), 7)
+        self.assertEqual(result.split("\n")[1], "")
+        self.assertTrue(partial, "SSE 过程中应产生 partial_text")
+        self.assertEqual(partial[-1], script_fixture)
 
 
 if __name__ == "__main__":

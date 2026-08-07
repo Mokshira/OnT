@@ -33,6 +33,7 @@ from .hotkey_manager import GlobalHotkeyManager
 from .image_utils import image_to_base64, qimage_to_pil_image
 from .main_window import MainWindow
 from .models_worker import ModelsFetchWorker
+from .prompt_utils import append_visual_layout_contract
 from .screenshot_tool import (
     CaptureResult,
     ScreenCaptureOverlay,
@@ -576,7 +577,7 @@ class AppController(QObject):
             if config.ocr_enabled:
                 self.main_window.update_ocr_result("正在执行 OCR 识别，请稍候...")
                 ocr_config = config.get_selected_ocr_api_config()
-                ocr_prompt = config.ocr_prompt_template or DEFAULT_OCR_PROMPT_TEMPLATE
+                ocr_prompt = self._build_ocr_prompt(config)
                 self._start_api_request(
                     "ocr",
                     ocr_config,
@@ -870,7 +871,7 @@ class AppController(QObject):
             if config.ocr_enabled:
                 self.main_window.update_ocr_result("检测到新的剪贴板图片，正在执行 OCR 识别...")
                 ocr_config = config.get_selected_ocr_api_config()
-                ocr_prompt = config.ocr_prompt_template or DEFAULT_OCR_PROMPT_TEMPLATE
+                ocr_prompt = self._build_ocr_prompt(config)
                 self._start_api_request(
                     "ocr",
                     ocr_config,
@@ -975,6 +976,18 @@ class AppController(QObject):
             self._show_error("翻译失败", message)
 
     @staticmethod
+    def _build_ocr_prompt(config: AppConfig) -> str:
+        """
+        构造最终发送给 OCR 模型的 Prompt。
+
+        以用户可编辑的 ocr_prompt_template（缺省回退默认模板）为基础，
+        在末尾幂等追加 ONT_LAYOUT_V1 版式协议，保证截图与剪贴板两条
+        OCR 路径使用同一版式要求，且不写回 / 不覆盖用户配置。
+        """
+        prompt = config.ocr_prompt_template or DEFAULT_OCR_PROMPT_TEMPLATE
+        return append_visual_layout_contract(prompt, task="ocr")
+
+    @staticmethod
     def _build_translation_prompt(config: AppConfig) -> str:
         prompt = (
             config.translation_prompt_template
@@ -986,7 +999,7 @@ class AppController(QObject):
                 "[OCR结果]",
                 "请直接识别图片中的文本内容，并翻译为目标语言。",
             )
-        return prompt
+        return append_visual_layout_contract(prompt, task="translation")
 
     def _get_image_from_clipboard(self) -> tuple[Image.Image, QPixmap]:
         clipboard = QApplication.clipboard()

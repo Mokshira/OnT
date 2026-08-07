@@ -303,6 +303,14 @@ class ApiWorker(QObject):
                         return ""
                     if progress_callback is not None:
                         progress_callback("".join(text_parts))
+                elif isinstance(content, str) and content.strip() == "":
+                    # 仅含空白字符（如 "\n"、" "）的流式增量同样携带结构信息，
+                    # 必须原样拼接，否则模型拆分在独立 chunk 中的换行会丢失，
+                    # 空白行（\n\n）会被吞成单个换行。此类 chunk 不触发进度刷新，
+                    # 等下一个含可见字符的 chunk 一并发出即可。
+                    text_parts.append(content)
+                    if should_cancel is not None and should_cancel():
+                        return ""
 
         return "".join(text_parts).strip()
 
