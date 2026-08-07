@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -31,7 +32,6 @@ DEFAULT_SUBTITLE_FONT_SIZE = 18
 DEFAULT_SUBTITLE_FONT_COLOR = "#ffffff"
 DEFAULT_SUBTITLE_BACKGROUND_COLOR = "#000000"
 DEFAULT_SUBTITLE_BACKGROUND_OPACITY = 24
-DEFAULT_SUBTITLE_BACKGROUND_BLUR = 0
 
 
 def _new_profile_id() -> str:
@@ -79,7 +79,6 @@ class AppConfig:
     subtitle_font_color: str = DEFAULT_SUBTITLE_FONT_COLOR
     subtitle_background_color: str = DEFAULT_SUBTITLE_BACKGROUND_COLOR
     subtitle_background_opacity: int = DEFAULT_SUBTITLE_BACKGROUND_OPACITY
-    subtitle_background_blur: int = DEFAULT_SUBTITLE_BACKGROUND_BLUR
 
     @staticmethod
     def _normalize_color(value: Any, default: str) -> str:
@@ -178,10 +177,6 @@ class AppConfig:
             max(int(self.subtitle_background_opacity), 0),
             100,
         )
-        self.subtitle_background_blur = min(
-            max(int(self.subtitle_background_blur), 0),
-            30,
-        )
 
     def get_selected_ocr_api_config(self) -> ApiConfig:
         self.ensure_valid_state()
@@ -277,6 +272,10 @@ class ConfigManager:
 
         先在同目录写入临时文件并 flush/fsync，再通过 os.replace 原子替换目标文件；
         任一步失败都保留原配置文件，避免产生半写入或截断的 config.json。
+
+        Windows 上杀毒软件 / 文件索引器可能瞬时锁定 config.json，导致
+        os.replace 抛出 WinError 5（拒绝访问）或 WinError 32（被占用）。
+        针对这类可恢复的瞬时错误做有限次退避重试；重试耗尽后仍失败才抛出。
         """
         temp_path = self.config_path.with_name(f".{self.config_path.name}.tmp")
         try:
@@ -289,13 +288,41 @@ class ConfigManager:
                 file.flush()
                 os.fsync(file.fileno())
 
-            os.replace(temp_path, self.config_path)
+            self._atomic_replace(temp_path, self.config_path)
         except OSError as exc:
             try:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
             raise RuntimeError(f"保存配置失败：{exc}") from exc
+
+    @staticmethod
+    def _atomic_replace(temp_path: Path, target_path: Path) -> None:
+        """
+        带退避重试的原子替换，用于缓解 Windows 上的瞬时文件锁定。
+
+        仅对 WinError 5（拒绝访问）/ WinError 32（文件被占用）重试，
+        其余 OSError 立即抛出。最多等待约 1.4 秒，避免长时间阻塞 UI。
+        """
+        retry_delays = (0.05, 0.1, 0.2, 0.4, 0.6)
+        last_error: OSError | None = None
+
+        for attempt, delay in enumerate(retry_delays):
+            try:
+                os.replace(temp_path, target_path)
+                return
+            except OSError as exc:
+                last_error = exc
+                # 真实 WinError 5/32 带 winerror；mock 或跨层转换可能只留 errno。
+                winerror = getattr(exc, "winerror", None)
+                err_no = getattr(exc, "errno", None)
+                if winerror not in (5, 32) and err_no not in (5, 32):
+                    raise
+                if attempt < len(retry_delays) - 1:
+                    time.sleep(delay)
+
+        assert last_error is not None
+        raise last_error
 
     @classmethod
     def _clone_api_configs(cls, api_configs: list[ApiConfig]) -> list[ApiConfig]:
@@ -376,12 +403,6 @@ class ConfigManager:
                         DEFAULT_SUBTITLE_BACKGROUND_OPACITY,
                     )
                 ),
-                subtitle_background_blur=int(
-                    data.get(
-                        "subtitle_background_blur",
-                        DEFAULT_SUBTITLE_BACKGROUND_BLUR,
-                    )
-                ),
             )
             config.ensure_valid_state()
             return config
@@ -428,12 +449,6 @@ class ConfigManager:
                     data.get(
                         "subtitle_background_opacity",
                         DEFAULT_SUBTITLE_BACKGROUND_OPACITY,
-                    )
-                ),
-                subtitle_background_blur=int(
-                    data.get(
-                        "subtitle_background_blur",
-                        DEFAULT_SUBTITLE_BACKGROUND_BLUR,
                     )
                 ),
             )
@@ -491,12 +506,6 @@ class ConfigManager:
                 data.get(
                     "subtitle_background_opacity",
                     DEFAULT_SUBTITLE_BACKGROUND_OPACITY,
-                )
-            ),
-            subtitle_background_blur=int(
-                data.get(
-                    "subtitle_background_blur",
-                    DEFAULT_SUBTITLE_BACKGROUND_BLUR,
                 )
             ),
         )

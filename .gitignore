@@ -28,6 +28,7 @@ config.json
 .workbuddy/
 .codex/
 .idea/
+.tests/
 *.swp
 .DS_Store
 Thumbs.db

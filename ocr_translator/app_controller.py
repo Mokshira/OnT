@@ -74,6 +74,16 @@ class AppController(QObject):
         self._tray_menu: Optional[QMenu] = None
         self._has_shown_tray_minimize_tip = False
 
+        # 外观变更防抖：滑块连续拖动会高频触发 appearance_changed，
+        # 若每次原子替换配置都可能撞上杀软/索引器瞬时锁定（WinError 5）。
+        # 延迟 400ms 合并为一次写盘，显著降低文件锁竞争。
+        self._appearance_save_timer = QTimer(self)
+        self._appearance_save_timer.setSingleShot(True)
+        self._appearance_save_timer.setInterval(400)
+        self._appearance_save_timer.timeout.connect(
+            self._persist_appearance_config_from_timer
+        )
+
         self._setup_windows()
         self._setup_system_tray()
         self._connect_signals()
@@ -668,6 +678,14 @@ class AppController(QObject):
 
         self._is_quitting = True
 
+        # 防抖期间若用户直接退出，先落盘一次最新外观，避免样式变更丢失。
+        if self._appearance_save_timer.isActive():
+            self._appearance_save_timer.stop()
+            try:
+                self._persist_config_without_validation()
+            except Exception:
+                pass
+
         if self._tray_icon is not None:
             try:
                 self._tray_icon.hide()
@@ -785,6 +803,25 @@ class AppController(QObject):
         self.main_window.display_toggle_button.toggle()
 
     def on_floating_appearance_changed(self) -> None:
+        """
+        悬浮窗外观变更入口：仅做防抖调度，不立即写盘。
+
+        字体大小 / 透明度滑块在连续拖动时会高频触发本槽，
+        延迟 400ms 合并为一次原子保存，避免与杀软/索引器争用 config.json。
+        """
+        if self._is_quitting:
+            return
+        self._appearance_save_timer.start()
+
+    def _persist_appearance_config_from_timer(self) -> None:
+        """
+        防抖定时器到期后的实际保存逻辑。
+
+        退出阶段跳过：退出时由 stop 路径按需决定是否保存，
+        避免在应用关闭过程中再触发磁盘 I/O。
+        """
+        if self._is_quitting:
+            return
         try:
             self._persist_config_without_validation()
         except Exception as exc:

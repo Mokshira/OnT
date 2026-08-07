@@ -313,7 +313,8 @@ class FloatingSubtitleWindow(QWidget):
 
     def _update_style_status_label(self) -> None:
         self.style_status_label.setText(
-            f"字号 {self._font_size}px | 透明度 {self._background_opacity}%"
+            f"字号 {self._font_size}px | "
+            f"透明度 {self._background_opacity}%"
         )
         self.font_size_value_label.setText(f"{self._font_size}px")
         self.opacity_value_label.setText(f"{self._background_opacity}%")
@@ -426,7 +427,7 @@ class FloatingSubtitleWindow(QWidget):
         self.text_label.setFont(font)
 
     def _apply_background_style(self) -> None:
-        alpha = round(self._background_opacity / 100 * 255)
+        panel_alpha = round(self._background_opacity / 100 * 255)
         self.background_panel.setStyleSheet(
             f"""
             QFrame#FloatingBackgroundPanel {{
@@ -434,7 +435,7 @@ class FloatingSubtitleWindow(QWidget):
                     {self._background_color.red()},
                     {self._background_color.green()},
                     {self._background_color.blue()},
-                    {alpha}
+                    {panel_alpha}
                 );
                 border-radius: 16px;
             }}
@@ -580,6 +581,21 @@ class FloatingSubtitleWindow(QWidget):
                 event.accept()
                 return
 
+            # 优先交给窗口系统执行原生拖动。Windows DWM 会在合成器层直接移动
+            # 窗口，避免 Python 鼠标事件逐帧调用 QWidget.move() 造成卡顿。
+            window_handle = self.windowHandle()
+            try:
+                system_move_started = (
+                    window_handle is not None and window_handle.startSystemMove()
+                )
+            except (AttributeError, RuntimeError):
+                system_move_started = False
+            if system_move_started:
+                self._drag_offset = None
+                event.accept()
+                return
+
+            # 少数平台不支持原生移动时保留手动拖动回退。
             self._drag_offset = (
                 event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             )
@@ -623,6 +639,11 @@ class FloatingSubtitleWindow(QWidget):
         self._apply_text_style()
         super().resizeEvent(event)
 
+    def showEvent(self, event) -> None:
+        # 原生窗口句柄在首次显示后才完全就绪，重新应用一次背景样式确保稳定。
+        super().showEvent(event)
+        self._apply_background_style()
+
     def _is_on_resize_edge(self, pos: QPoint) -> bool:
         return (
             pos.x() >= self.width() - self._resize_margin
@@ -639,25 +660,25 @@ class FloatingSubtitleWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        border_alpha = min(
-            220, max(60, round(self._background_opacity / 100 * 255) + 20)
-        )
+        # 透明度为 0 时，背景装饰也必须真正透明；此前边框最低
+        # alpha=60、缩放手柄固定可见，会让用户看到一层“没有归零”的残影。
+        decoration_scale = self._background_opacity / 100
+        border_alpha = round(220 * decoration_scale)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.setPen(QPen(QColor(255, 255, 255, border_alpha), 1))
-        painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 16, 16)
+        if border_alpha > 0:
+            painter.setPen(QPen(QColor(255, 255, 255, border_alpha), 1))
+            painter.drawRoundedRect(self.rect().adjusted(1, 1, -2, -2), 16, 16)
 
-        handle_color = (
-            QColor(255, 255, 255, 190)
-            if not self._is_locked
-            else QColor(255, 255, 255, 70)
-        )
-        painter.setPen(QPen(handle_color, 2))
+        handle_base_alpha = 190 if not self._is_locked else 70
+        handle_alpha = round(handle_base_alpha * decoration_scale)
+        if handle_alpha > 0:
+            painter.setPen(QPen(QColor(255, 255, 255, handle_alpha), 2))
 
-        right = self.width() - 10
-        bottom = self.height() - 10
+            right = self.width() - 10
+            bottom = self.height() - 10
 
-        painter.drawLine(right - 18, bottom, right, bottom - 18)
-        painter.drawLine(right - 12, bottom, right, bottom - 12)
-        painter.drawLine(right - 6, bottom, right, bottom - 6)
+            painter.drawLine(right - 18, bottom, right, bottom - 18)
+            painter.drawLine(right - 12, bottom, right, bottom - 12)
+            painter.drawLine(right - 6, bottom, right, bottom - 6)
 
         super().paintEvent(event)
