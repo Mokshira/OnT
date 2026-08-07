@@ -30,9 +30,26 @@ requests>=2.32.0
 Pillow>=10.3.0
 ```
 
-## 启动
+## 安装与启动
 
-在项目根目录运行：
+### 开发环境
+
+在项目根目录执行：
+
+```bash
+python -m venv .venv
+.venv\Scripts\pip.exe install -r requirements.txt
+```
+
+可选：从示例配置生成本地配置（推荐，避免手写字段）：
+
+```bash
+copy config.example.json config.json
+```
+
+然后用编辑器或应用内「展开设置」填写真实的 `api_key`、`base_url`、`model_name`。
+
+启动：
 
 ```bash
 .venv\Scripts\python.exe main.py
@@ -40,7 +57,9 @@ Pillow>=10.3.0
 
 项目使用根目录的 `.venv` 作为开发与测试虚拟环境。
 
-或解压 `Releases` 的文件后直接运行。
+### 打包版本
+
+解压 `Releases` 中的文件后直接运行可执行文件。首次运行会在 exe 同目录生成 `config.json`；也可事先将 `config.example.json` 复制为 `config.json` 再填写密钥。
 
 ## 项目结构
 
@@ -57,29 +76,32 @@ OnT/
 │   ├── screenshot_tool.py  # 屏幕框选与截图
 │   └── ...
 ├── assets/                 # 图标等静态资源
-├── config.json             # 配置文件
+├── tests/                  # 单元测试
+├── config.example.json     # 配置示例（可提交到仓库）
+├── config.json             # 本地配置（含密钥，已被 .gitignore 忽略）
 ├── requirements.txt
 └── .venv/                  # 项目虚拟环境
 ```
 
 ## 快速开始
 
-1. 启动应用。
-2. 点击主窗口顶部的「展开设置」。
-3. 在「识别配置」中填写 OCR API：
+1. 按上文完成安装，并准备好 `config.json`（可从 `config.example.json` 复制）。
+2. 启动应用。
+3. 点击主窗口顶部的「展开设置」。
+4. 在「识别配置」中填写 OCR API：
    - API Key
    - API Base URL
    - 模型名称
    - OCR 提示词
-4. 切换到「翻译配置」，填写翻译 API：
+5. 切换到「翻译配置」，填写翻译 API：
    - API Key
    - API Base URL
    - 模型名称
    - 目标语言
    - 翻译提示词
-5. 点击「保存配置」。
-6. 点击「框选」，拖拽选择需要识别或翻译的屏幕区域。
-7. OCR 结果会显示在主窗口中，翻译结果会显示在悬浮翻译展示区中。
+6. 点击「保存配置」。
+7. 点击「框选」，拖拽选择需要识别或翻译的屏幕区域。
+8. OCR 结果会显示在主窗口中，翻译结果会显示在悬浮翻译展示区中。
 
 ## API 配置说明
 
@@ -169,26 +191,55 @@ OnT/
 
 ## 配置文件
 
-默认配置文件名：
+| 文件 | 用途 | 是否入库 |
+| --- | --- | --- |
+| `config.example.json` | 字段齐全的示例配置，密钥为空 | 是 |
+| `config.json` | 本地真实配置（含 API Key） | 否（`.gitignore` 已忽略） |
 
-```text
-config.json
-```
-
-配置保存位置：
+### 配置位置
 
 - **开发环境**：项目根目录下的 `config.json`。
 - **打包环境**：exe 所在目录下的 `config.json`。
 
-配置内容包括：
+首次启动且不存在配置文件时，应用会使用内置默认值；之后在界面中保存会写出 `config.json`。
 
-- OCR API Profile 列表；
-- 当前选中的 OCR API Profile；
-- 翻译 API Profile 列表；
-- 当前选中的翻译 API Profile；
-- OCR / 翻译开关；
-- 目标语言；
-- OCR / 翻译 Prompt；
-- 全局刷新快捷键；
-- 悬浮翻译展示区样式。
+### 安全说明
 
+- **不要**将填有真实 `api_key` 的 `config.json` 提交到 Git 或分享给他人。
+- 请以 `config.example.json` 为模板创建本地配置，只在本机填写密钥。
+- 若密钥曾意外泄露，请立即在服务商控制台轮换 / 作废。
+
+### 主要字段
+
+| 字段 | 说明 |
+| --- | --- |
+| `ocr_api_configs` / `translation_api_configs` | OCR / 翻译的 API Profile 列表 |
+| `selected_ocr_api_config_id` / `selected_translation_api_config_id` | 当前选中的 Profile ID |
+| `ocr_enabled` / `translation_enabled` | 是否执行 OCR / 翻译 |
+| `target_language` | 翻译目标语言（替换 Prompt 中的 `[目标语言]`） |
+| `ocr_prompt_template` / `translation_prompt_template` | OCR / 翻译提示词 |
+| `refresh_shortcut` | 刷新框选区域的全局快捷键 |
+| `subtitle_font_size` / `subtitle_font_color` | 悬浮窗字号与文字颜色 |
+| `subtitle_background_color` / `subtitle_background_opacity` | 悬浮窗背景色与透明度（0–100） |
+
+单个 API Profile 字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `profile_id` | 配置唯一 ID |
+| `profile_name` | 显示名称 |
+| `api_key` | API 密钥（可为空，用于部分本地服务） |
+| `base_url` | 服务地址（见上方规范化规则） |
+| `model_name` | 模型名称 |
+
+完整示例见仓库根目录的 [`config.example.json`](./config.example.json)。
+
+## 测试
+
+在项目根目录、已安装依赖的环境下：
+
+```bash
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+部分界面相关测试会使用 Qt offscreen 平台，适合在无显示器的 CI 中运行。
