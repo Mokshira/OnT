@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFontMetrics, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
-    QGridLayout,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMainWindow,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QStackedWidget,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -22,13 +22,14 @@ from .config_manager import (
     ApiConfig,
     AppConfig,
     DEFAULT_API_PROFILE_NAME,
-    DEFAULT_MODEL_NAME,
     DEFAULT_OCR_PROMPT_TEMPLATE,
     DEFAULT_REFRESH_SHORTCUT,
     DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
 )
-from .ui_widgets import ShortcutCaptureEdit, StyledComboBox
 from .floating_window import render_markdown_preserving_line_breaks
+from .settings_dialog import SettingsDialog
+from .theme import apply_window_theme
+from .ui_widgets import KbdBadge, Pill, ToggleSwitch, refresh_widget_style
 
 
 class MainWindow(QMainWindow):
@@ -48,495 +49,502 @@ class MainWindow(QMainWindow):
         self._translation_prompt_template = DEFAULT_TRANSLATION_PROMPT_TEMPLATE
         self._target_language = "简体中文"
         self._ocr_result_text = ""
+        self._preview_source_pixmap = QPixmap()
+        self._is_config_drawer_open = False
+        self._page_animation: QPropertyAnimation | None = None
+        self._page_effects: dict[int, QGraphicsOpacityEffect] = {}
+
         self._toast_hide_timer = QTimer(self)
         self._toast_hide_timer.setSingleShot(True)
-        self._is_config_drawer_open = False
+
         self._setup_window()
         self._setup_ui()
+        apply_window_theme(self)
+        self.switch_config_role("ocr", save_current=False)
+        self.set_config_drawer_visible(False)
+        self._set_page(0, animate=False)
 
     def _setup_window(self) -> None:
+        self.setObjectName("MainWindow")
         self.setWindowTitle("OCR 与翻译助手")
-        self.resize(980, 640)
+        self.resize(1040, 680)
         self.setMinimumSize(900, 560)
 
     def _setup_ui(self) -> None:
         central = QWidget()
+        central.setObjectName("AppRoot")
         self.setCentralWidget(central)
 
         root_layout = QVBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
 
-        main_scroll = QScrollArea()
-        main_scroll.setWidgetResizable(True)
-        main_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        main_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        main_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        root_layout.addWidget(main_scroll)
+        body = QWidget()
+        body.setObjectName("ContentViewport")
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
 
-        content_widget = QWidget()
-        main_scroll.setWidget(content_widget)
+        body_layout.addWidget(self._build_sidebar())
 
-        outer_layout = QVBoxLayout(content_widget)
-        outer_layout.setContentsMargins(16, 16, 16, 16)
-        outer_layout.setSpacing(12)
+        content_area = QFrame()
+        content_area.setObjectName("ContentArea")
+        content_layout = QVBoxLayout(content_area)
+        content_layout.setContentsMargins(14, 14, 14, 14)
+        content_layout.setSpacing(0)
 
-        top_switch_row = QHBoxLayout()
-        top_switch_row.setSpacing(10)
+        self.page_stack = QStackedWidget()
+        self.overview_page = self._build_overview_page()
+        self.results_page = self._build_results_page()
+        self.page_stack.addWidget(self.overview_page)
+        self.page_stack.addWidget(self.results_page)
+        content_layout.addWidget(self.page_stack)
+        body_layout.addWidget(content_area, 1)
 
-        self.ocr_mode_button = QPushButton("识别配置")
-        self.ocr_mode_button.setObjectName("SecondaryButton")
-        self.ocr_mode_button.setCheckable(True)
-        self.ocr_mode_button.clicked.connect(
-            lambda: self._open_config_drawer_for_role("ocr")
+        root_layout.addWidget(body, 1)
+        root_layout.addWidget(self._build_bottom_bar())
+
+        self.settings_dialog = SettingsDialog(self)
+        self._bind_settings_controls()
+        self._connect_ui_signals()
+        self._setup_toast()
+
+    def _build_sidebar(self) -> QFrame:
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(188)
+
+        layout = QVBoxLayout(sidebar)
+        layout.setContentsMargins(16, 18, 16, 16)
+        layout.setSpacing(4)
+
+        brand = QLabel("OnT")
+        brand.setObjectName("BrandName")
+        eyebrow = QLabel("OCR TRANSLATOR")
+        eyebrow.setObjectName("Eyebrow")
+        layout.addWidget(brand)
+        layout.addSpacing(2)
+        layout.addWidget(eyebrow)
+        layout.addSpacing(22)
+
+        self.overview_nav_button = QPushButton("概览")
+        self.overview_nav_button.setObjectName("SidebarItem")
+        self.overview_nav_button.setProperty("active", True)
+
+        self.results_nav_button = QPushButton("识别结果")
+        self.results_nav_button.setObjectName("SidebarItem")
+        self.results_nav_button.setProperty("active", False)
+
+        layout.addWidget(self.overview_nav_button)
+        layout.addWidget(self.results_nav_button)
+        layout.addStretch(1)
+        return sidebar
+
+    def _new_content_page(self) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        page.setObjectName("ContentViewport")
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
+        card = QFrame()
+        card.setObjectName("ContentCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        viewport = QWidget()
+        viewport.setObjectName("ContentViewport")
+        content_layout = QVBoxLayout(viewport)
+        content_layout.setContentsMargins(26, 24, 26, 26)
+        content_layout.setSpacing(0)
+        scroll.setWidget(viewport)
+
+        card_layout.addWidget(scroll)
+        page_layout.addWidget(card)
+        return page, content_layout
+
+    def _page_header(
+        self,
+        eyebrow_text: str,
+        title_text: str,
+        description_text: str,
+        actions: list[QPushButton] | None = None,
+    ) -> QWidget:
+        header = QWidget()
+        header.setObjectName("ContentViewport")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.setSpacing(12)
+
+        labels = QWidget()
+        labels.setObjectName("ContentViewport")
+        labels_layout = QVBoxLayout(labels)
+        labels_layout.setContentsMargins(0, 0, 0, 0)
+        labels_layout.setSpacing(4)
+
+        eyebrow = QLabel(eyebrow_text)
+        eyebrow.setObjectName("Eyebrow")
+        title = QLabel(title_text)
+        title.setObjectName("PageTitle")
+        description = QLabel(description_text)
+        description.setObjectName("PageDescription")
+        description.setWordWrap(True)
+
+        labels_layout.addWidget(eyebrow)
+        labels_layout.addWidget(title)
+        labels_layout.addWidget(description)
+        header_layout.addWidget(labels, 1)
+
+        if actions:
+            action_box = QWidget()
+            action_box.setObjectName("ContentViewport")
+            action_layout = QHBoxLayout(action_box)
+            action_layout.setContentsMargins(0, 0, 0, 0)
+            action_layout.setSpacing(8)
+            for button in actions:
+                action_layout.addWidget(button)
+            header_layout.addWidget(action_box, 0, Qt.AlignmentFlag.AlignTop)
+
+        return header
+
+    def _build_overview_page(self) -> QWidget:
+        page, layout = self._new_content_page()
+
+        self.capture_button = QPushButton("开始框选")
+        self.capture_button.setProperty("variant", "primary")
+        self.capture_button.setToolTip("打开截图选区工具")
+
+        self.clipboard_button = QPushButton("剪贴板自动处理：已关闭")
+        self.clipboard_button.setObjectName("SecondaryButton")
+        self.clipboard_button.setCheckable(True)
+        self.clipboard_button.setToolTip("监控剪贴板中的图片并自动识别")
+
+        layout.addWidget(
+            self._page_header(
+                "OVERVIEW",
+                "概览",
+                "查看服务状态，并从这里开始一次截图识别。",
+                [self.clipboard_button, self.capture_button],
+            )
+        )
+        layout.addSpacing(24)
+
+        hint_card = QFrame()
+        hint_card.setObjectName("HintCard")
+        hint_layout = QHBoxLayout(hint_card)
+        hint_layout.setContentsMargins(16, 14, 16, 14)
+        hint_layout.setSpacing(16)
+
+        hint_copy = QWidget()
+        hint_copy.setObjectName("ContentViewport")
+        hint_copy_layout = QVBoxLayout(hint_copy)
+        hint_copy_layout.setContentsMargins(0, 0, 0, 0)
+        hint_copy_layout.setSpacing(3)
+        hint_title = QLabel("按下截图快捷键开始识别")
+        hint_title.setObjectName("CardTitle")
+        hint_detail = QLabel("在任意应用中框选需要处理的画面区域")
+        hint_detail.setObjectName("CardDetail")
+        hint_copy_layout.addWidget(hint_title)
+        hint_copy_layout.addWidget(hint_detail)
+
+        self.shortcut_kbd_container = QWidget()
+        self.shortcut_kbd_container.setObjectName("ContentViewport")
+        self.shortcut_kbd_layout = QHBoxLayout(self.shortcut_kbd_container)
+        self.shortcut_kbd_layout.setContentsMargins(0, 0, 0, 0)
+        self.shortcut_kbd_layout.setSpacing(5)
+
+        hint_layout.addWidget(hint_copy, 1)
+        hint_layout.addWidget(self.shortcut_kbd_container)
+        layout.addWidget(hint_card)
+        layout.addSpacing(24)
+
+        status_title = QLabel("服务状态")
+        status_title.setObjectName("SectionTitle")
+        layout.addWidget(status_title)
+        layout.addSpacing(10)
+
+        self.ocr_enabled_button = ToggleSwitch()
+        self.ocr_enabled_button.setChecked(True)
+        (
+            ocr_card,
+            self.ocr_status_pill,
+            self.ocr_profile_summary_label,
+            self.ocr_model_summary_label,
+        ) = self._build_status_card(
+            "OCR 服务",
+            self.ocr_enabled_button,
         )
 
-        self.translation_mode_button = QPushButton("翻译配置")
-        self.translation_mode_button.setObjectName("SecondaryButton")
-        self.translation_mode_button.setCheckable(True)
-        self.translation_mode_button.clicked.connect(
-            lambda: self._open_config_drawer_for_role("translation")
+        self.translation_enabled_button = ToggleSwitch()
+        self.translation_enabled_button.setChecked(True)
+        (
+            translation_card,
+            self.translation_status_pill,
+            self.translation_profile_summary_label,
+            self.translation_model_summary_label,
+        ) = self._build_status_card(
+            "翻译服务",
+            self.translation_enabled_button,
         )
 
-        self.top_mode_hint_label = QLabel()
-        self.top_mode_hint_label.setObjectName("Desc")
-        self.top_mode_hint_label.setWordWrap(True)
-
-        self.drawer_toggle_button = QPushButton("展开设置")
-        self.drawer_toggle_button.setObjectName("SecondaryButton")
-        self.drawer_toggle_button.clicked.connect(
-            lambda: self.set_config_drawer_visible(not self._is_config_drawer_open)
+        self.display_toggle_button = ToggleSwitch()
+        self.display_toggle_button.setChecked(True)
+        (
+            display_card,
+            self.display_status_pill,
+            self.display_profile_summary_label,
+            self.display_model_summary_label,
+        ) = self._build_status_card(
+            "悬浮字幕",
+            self.display_toggle_button,
         )
+        self.display_profile_summary_label.setText("原有展示窗口")
+        self.display_model_summary_label.setText("外观与交互保持不变")
 
-        top_switch_row.addWidget(self.ocr_mode_button)
-        top_switch_row.addWidget(self.translation_mode_button)
-        top_switch_row.addSpacing(8)
-        top_switch_row.addWidget(self.top_mode_hint_label, 1)
-        top_switch_row.addWidget(self.drawer_toggle_button)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(10)
+        status_row.addWidget(ocr_card, 1)
+        status_row.addWidget(translation_card, 1)
+        status_row.addWidget(display_card, 1)
+        layout.addLayout(status_row)
+        layout.addStretch(1)
+        return page
 
-        self.config_drawer_panel = self._build_config_panel()
-        self.preview_panel = self._build_preview_panel()
-        self.preview_panel.setMinimumWidth(360)
+    def _build_status_card(
+        self,
+        title_text: str,
+        toggle: ToggleSwitch,
+    ) -> tuple[QFrame, Pill, QLabel, QLabel]:
+        card = QFrame()
+        card.setObjectName("StatusCard")
+        card.setMinimumWidth(170)
+        card.setMinimumHeight(132)
 
-        outer_layout.addLayout(top_switch_row)
-        outer_layout.addWidget(self.config_drawer_panel)
-        outer_layout.addWidget(self.preview_panel, 1)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(15, 14, 15, 14)
+        card_layout.setSpacing(5)
 
+        top_row = QHBoxLayout()
+        top_row.setSpacing(8)
+        title = QLabel(title_text)
+        title.setObjectName("CardTitle")
+        top_row.addWidget(title)
+        top_row.addStretch(1)
+        top_row.addWidget(toggle, 0, Qt.AlignmentFlag.AlignTop)
+        card_layout.addLayout(top_row)
+
+        status = Pill("开启", "ok")
+        card_layout.addWidget(status)
+        card_layout.addSpacing(4)
+
+        profile = QLabel("默认配置")
+        profile.setObjectName("CardDetail")
+        profile.setWordWrap(True)
+        model = QLabel("未选择模型")
+        model.setObjectName("Muted")
+        model.setWordWrap(True)
+        card_layout.addWidget(profile)
+        card_layout.addWidget(model)
+        card_layout.addStretch(1)
+        return card, status, profile, model
+
+    def _build_results_page(self) -> QWidget:
+        page, layout = self._new_content_page()
+
+        self.copy_ocr_button = QPushButton("复制结果")
+        self.copy_ocr_button.setProperty("variant", "ghost")
+        layout.addWidget(
+            self._page_header(
+                "RESULTS",
+                "识别结果",
+                "查看最近一次截图与 OCR 原文。",
+                [self.copy_ocr_button],
+            )
+        )
+        layout.addSpacing(24)
+
+        result_row = QHBoxLayout()
+        result_row.setSpacing(12)
+
+        preview_card = QFrame()
+        preview_card.setObjectName("PreviewCard")
+        preview_layout = QVBoxLayout(preview_card)
+        preview_layout.setContentsMargins(16, 15, 16, 16)
+        preview_layout.setSpacing(10)
+        preview_title = QLabel("截图预览")
+        preview_title.setObjectName("CardTitle")
+        self.preview_label = QLabel("尚无截图预览")
+        self.preview_label.setObjectName("PreviewCanvas")
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumSize(250, 270)
+        self.preview_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
+        preview_layout.addWidget(preview_title)
+        preview_layout.addWidget(self.preview_label, 1)
+
+        result_card = QFrame()
+        result_card.setObjectName("ResultCard")
+        text_layout = QVBoxLayout(result_card)
+        text_layout.setContentsMargins(16, 15, 16, 16)
+        text_layout.setSpacing(10)
+        result_title = QLabel("OCR 原文")
+        result_title.setObjectName("CardTitle")
+        self.ocr_result_output = QTextBrowser()
+        self.ocr_result_output.setObjectName("ResultOutput")
+        self.ocr_result_output.setReadOnly(True)
+        self.ocr_result_output.setPlaceholderText(
+            "完成截图后，OCR 识别结果会显示在这里。"
+        )
+        self.ocr_result_output.setMinimumSize(250, 270)
+        text_layout.addWidget(result_title)
+        text_layout.addWidget(self.ocr_result_output, 1)
+
+        result_row.addWidget(preview_card, 1)
+        result_row.addWidget(result_card, 1)
+        layout.addLayout(result_row, 1)
+        return page
+
+    def _build_bottom_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("BottomBar")
+        bar.setFixedHeight(44)
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(16, 0, 16, 0)
+        layout.setSpacing(8)
+
+        version = QLabel("v1.0.0")
+        version.setObjectName("Muted")
+        layout.addWidget(version)
+        layout.addStretch(1)
+
+        self.settings_button = QPushButton("⚙")
+        self.settings_button.setObjectName("BottomSettingsButton")
+        self.settings_button.setToolTip("打开设置")
+        self.settings_button.setAccessibleName("设置")
+        layout.addWidget(self.settings_button)
+        return bar
+
+    def _bind_settings_controls(self) -> None:
+        dialog = self.settings_dialog
+        self.api_profile_combo = dialog.api_profile_combo
+        self.add_api_profile_button = dialog.add_api_profile_button
+        self.update_api_profile_button = dialog.update_api_profile_button
+        self.delete_api_profile_button = dialog.delete_api_profile_button
+        self.api_profile_name_input = dialog.api_profile_name_input
+        self.api_key_input = dialog.api_key_input
+        self.toggle_api_key_button = dialog.toggle_api_key_button
+        self.base_url_input = dialog.base_url_input
+        self.model_name_combo = dialog.model_name_combo
+        self.fetch_models_button = dialog.fetch_models_button
+        self.cancel_fetch_models_button = dialog.cancel_fetch_models_button
+        self.target_language_input = dialog.target_language_input
+        self.prompt_input = dialog.prompt_input
+        self.prompt_label = dialog.prompt_label
+        self.refresh_shortcut_input = dialog.refresh_shortcut_input
+        self.refresh_shortcut_hint_label = dialog.refresh_shortcut_hint_label
+        self.save_button = dialog.save_button
+
+        self.ocr_mode_button = dialog.role_segment.button("ocr")
+        self.translation_mode_button = dialog.role_segment.button("translation")
+        self.config_drawer_panel = dialog
+        self.drawer_toggle_button = self.settings_button
+        self.preview_panel = self.results_page
+
+    def _connect_ui_signals(self) -> None:
+        self.overview_nav_button.clicked.connect(
+            lambda _checked=False: self._set_page(0)
+        )
+        self.results_nav_button.clicked.connect(
+            lambda _checked=False: self._set_page(1)
+        )
+        self.settings_button.clicked.connect(
+            lambda _checked=False: self.set_config_drawer_visible(True)
+        )
+        self.settings_dialog.finished.connect(self._on_settings_dialog_finished)
+        self.settings_dialog.role_segment.selectionChanged.connect(
+            self.switch_config_role
+        )
+        self.api_profile_combo.currentIndexChanged.connect(
+            self.on_api_profile_selection_changed
+        )
+        self.toggle_api_key_button.clicked.connect(self.toggle_api_key_visibility)
+        self.ocr_enabled_button.toggled.connect(
+            self._update_ocr_enabled_button_text
+        )
+        self.translation_enabled_button.toggled.connect(
+            self._update_translation_enabled_button_text
+        )
+        self.display_toggle_button.toggled.connect(self._update_display_status_text)
+
+    def _setup_toast(self) -> None:
         self._toast_label = QLabel(self)
-        self._toast_label.hide()
+        self._toast_label.setObjectName("Toast")
         self._toast_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._toast_label.setWordWrap(False)
         self._toast_label.setSizePolicy(
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Fixed,
         )
-        self._toast_label.setStyleSheet(
-            """
-            QLabel {
-                background: rgba(15, 23, 42, 220);
-                color: white;
-                border-radius: 12px;
-                padding: 10px 18px;
-                font-size: 13px;
-                font-weight: 700;
-            }
-            """
+        self._toast_label.hide()
+
+        self._toast_opacity = QGraphicsOpacityEffect(self._toast_label)
+        self._toast_opacity.setOpacity(0.0)
+        self._toast_label.setGraphicsEffect(self._toast_opacity)
+
+        self._toast_fade_in = QPropertyAnimation(
+            self._toast_opacity,
+            b"opacity",
+            self,
         )
-        self._toast_hide_timer.timeout.connect(self._toast_label.hide)
+        self._toast_fade_in.setDuration(180)
+        self._toast_fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
 
-        self.setStyleSheet(
-            """
-            QMainWindow {
-                background: #eef3fb;
-            }
-            QScrollArea {
-                border: none;
-                background: transparent;
-            }
-            QFrame#Card {
-                background: #ffffff;
-                border: 1px solid #d8e1ef;
-                border-radius: 14px;
-            }
-            QLabel#Title {
-                font-size: 20px;
-                font-weight: 700;
-                color: #0f172a;
-            }
-            QLabel#Desc {
-                color: #64748b;
-                font-size: 12px;
-            }
-            QLabel#Hint {
-                color: #64748b;
-                font-size: 12px;
-            }
-            QLabel#SectionTitle {
-                font-size: 14px;
-                font-weight: 700;
-                color: #1e293b;
-                margin-top: 4px;
-            }
-            QLabel {
-                color: #334155;
-                font-size: 13px;
-            }
-            QLineEdit, QPlainTextEdit, QTextBrowser, QComboBox, QKeySequenceEdit {
-                background: #ffffff;
-                border: 1px solid #cbd5e1;
-                border-radius: 10px;
-                padding: 8px 10px;
-                font-size: 13px;
-                color: #111827;
-            }
-            QLineEdit:focus, QPlainTextEdit:focus, QTextBrowser:focus, QComboBox:focus, QKeySequenceEdit:focus {
-                border: 1px solid #3b82f6;
-            }
-            QComboBox {
-                min-height: 20px;
-                padding-right: 32px;
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 30px;
-                border: none;
-                background: transparent;
-            }
-            QComboBox::down-arrow {
-                image: none;
-                width: 0px;
-                height: 0px;
-            }
-            QComboBox QAbstractItemView {
-                background: white;
-                border: 1px solid #cbd5e1;
-                selection-background-color: #dbeafe;
-                selection-color: #111827;
-                outline: none;
-            }
-            QPushButton {
-                border: none;
-                border-radius: 10px;
-                padding: 10px 16px;
-                font-size: 14px;
-                font-weight: 700;
-            }
-            QPushButton#PrimaryButton {
-                background: #2563eb;
-                color: white;
-            }
-            QPushButton#PrimaryButton:hover {
-                background: #1d4ed8;
-            }
-            QPushButton#PrimaryButton:pressed {
-                background: #1e40af;
-            }
-            QPushButton#SecondaryButton {
-                background: #e2e8f0;
-                color: #0f172a;
-            }
-            QPushButton#SecondaryButton:hover {
-                background: #cbd5e1;
-            }
-            QPushButton#SecondaryButton:checked {
-                background: #dbeafe;
-                color: #1d4ed8;
-            }
-            """
+        self._toast_fade_out = QPropertyAnimation(
+            self._toast_opacity,
+            b"opacity",
+            self,
         )
+        self._toast_fade_out.setDuration(180)
+        self._toast_fade_out.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._toast_fade_out.finished.connect(self._toast_label.hide)
+        self._toast_hide_timer.timeout.connect(self._hide_toast)
 
-        self.switch_config_role("ocr", save_current=False)
-        self.set_config_drawer_visible(False)
+    def _set_page(self, index: int, animate: bool = True) -> None:
+        if index < 0 or index >= self.page_stack.count():
+            return
 
-    def _build_config_panel(self) -> QFrame:
-        card = QFrame()
-        card.setObjectName("Card")
+        self.page_stack.setCurrentIndex(index)
+        self.overview_nav_button.setProperty("active", index == 0)
+        self.results_nav_button.setProperty("active", index == 1)
+        refresh_widget_style(self.overview_nav_button)
+        refresh_widget_style(self.results_nav_button)
 
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
+        if not animate or not self.isVisible():
+            return
 
-        self.config_title_label = QLabel("识别配置")
-        self.config_title_label.setObjectName("Title")
-        layout.addWidget(self.config_title_label)
+        if self._page_animation is not None:
+            self._page_animation.stop()
 
-        self.config_desc_label = QLabel()
-        self.config_desc_label.setObjectName("Desc")
-        self.config_desc_label.setWordWrap(True)
-        layout.addWidget(self.config_desc_label)
+        page = self.page_stack.widget(index)
+        effect = self._page_effects.get(index)
+        if effect is None:
+            effect = QGraphicsOpacityEffect(page)
+            page.setGraphicsEffect(effect)
+            self._page_effects[index] = effect
 
-        section_label = QLabel("API 配置管理")
-        section_label.setObjectName("SectionTitle")
-        layout.addWidget(section_label)
-
-        self.api_profile_list_label = QLabel("已保存配置")
-        layout.addWidget(self.api_profile_list_label)
-
-        api_profile_row = QHBoxLayout()
-        api_profile_row.setSpacing(8)
-
-        self.api_profile_combo = StyledComboBox()
-        self.api_profile_combo.currentIndexChanged.connect(
-            self.on_api_profile_selection_changed
-        )
-
-        self.add_api_profile_button = QPushButton("新增")
-        self.add_api_profile_button.setObjectName("SecondaryButton")
-
-        self.update_api_profile_button = QPushButton("更新")
-        self.update_api_profile_button.setObjectName("SecondaryButton")
-
-        self.delete_api_profile_button = QPushButton("删除")
-        self.delete_api_profile_button.setObjectName("SecondaryButton")
-
-        api_profile_row.addWidget(self.api_profile_combo, 1)
-        api_profile_row.addWidget(self.add_api_profile_button)
-        api_profile_row.addWidget(self.update_api_profile_button)
-        api_profile_row.addWidget(self.delete_api_profile_button)
-        layout.addLayout(api_profile_row)
-
-        self.api_profile_name_label = QLabel("配置名称")
-        layout.addWidget(self.api_profile_name_label)
-
-        self.api_profile_name_input = QLineEdit()
-        layout.addWidget(self.api_profile_name_input)
-
-        self.api_section_title_label = QLabel("当前 API 连接参数")
-        self.api_section_title_label.setObjectName("SectionTitle")
-        layout.addWidget(self.api_section_title_label)
-
-        self.api_key_label = QLabel("API Key（访问密钥）")
-        layout.addWidget(self.api_key_label)
-
-        api_key_row = QHBoxLayout()
-        api_key_row.setSpacing(10)
-
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
-
-        self.toggle_api_key_button = QPushButton("显示密钥")
-        self.toggle_api_key_button.setObjectName("SecondaryButton")
-        self.toggle_api_key_button.setMinimumWidth(88)
-        self.toggle_api_key_button.clicked.connect(self.toggle_api_key_visibility)
-
-        api_key_row.addWidget(self.api_key_input, 1)
-        api_key_row.addWidget(self.toggle_api_key_button)
-        layout.addLayout(api_key_row)
-
-        self.base_url_label = QLabel("API Base URL")
-        layout.addWidget(self.base_url_label)
-
-        self.base_url_input = QLineEdit()
-        layout.addWidget(self.base_url_input)
-
-        self.model_name_label = QLabel("模型名称")
-        layout.addWidget(self.model_name_label)
-
-        model_row = QHBoxLayout()
-        model_row.setSpacing(10)
-
-        self.model_name_combo = StyledComboBox()
-        self.model_name_combo.setEditable(True)
-        self.model_name_combo.addItems(
-            [
-                "gpt-4o",
-                "gpt-4.1",
-                "gpt-5",
-                "gemini-1.5-pro",
-                "qwen-vl-plus",
-            ]
-        )
-        self.model_name_combo.setCurrentText(DEFAULT_MODEL_NAME)
-
-        self.fetch_models_button = QPushButton("拉取模型")
-        self.fetch_models_button.setObjectName("SecondaryButton")
-        self.fetch_models_button.setToolTip("后台拉取当前 API 配置的模型列表")
-
-        self.cancel_fetch_models_button = QPushButton("取消")
-        self.cancel_fetch_models_button.setObjectName("SecondaryButton")
-        self.cancel_fetch_models_button.setToolTip("取消正在进行的模型列表拉取")
-        self.cancel_fetch_models_button.hide()
-
-        model_row.addWidget(self.model_name_combo, 1)
-        model_row.addWidget(self.fetch_models_button)
-        model_row.addWidget(self.cancel_fetch_models_button)
-        layout.addLayout(model_row)
-
-        self.target_language_label = QLabel("翻译目标语言")
-        layout.addWidget(self.target_language_label)
-
-        self.target_language_input = QLineEdit()
-        self.target_language_input.setPlaceholderText("例如：简体中文、English、日本語")
-        layout.addWidget(self.target_language_input)
-
-        self.prompt_label = QLabel("提示词（Prompt）")
-        layout.addWidget(self.prompt_label)
-
-        self.prompt_input = QPlainTextEdit()
-        self.prompt_input.setMinimumHeight(180)
-        self.prompt_input.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding,
-        )
-        layout.addWidget(self.prompt_input, 1)
-
-        layout.addStretch(1)
-
-        return card
-
-    def _build_preview_panel(self) -> QFrame:
-        card = QFrame()
-        card.setObjectName("Card")
-
-        layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(14)
-
-        title = QLabel("OCR和翻译并行")
-        title.setObjectName("Title")
-        layout.addWidget(title)
-
-        first_row = QHBoxLayout()
-        first_row.setSpacing(12)
-        unified_box_height = 220
-
-        preview_column = QVBoxLayout()
-        preview_column.setSpacing(8)
-        preview_title = QLabel("截图预览")
-        preview_title.setObjectName("SectionTitle")
-        preview_column.addWidget(preview_title)
-
-        self.preview_label = QLabel("尚无截图预览")
-        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumWidth(240)
-        self.preview_label.setFixedHeight(unified_box_height)
-        self.preview_label.setStyleSheet(
-            """
-            QLabel {
-                background: #edf2f7;
-                border: 2px dashed #bfd0ea;
-                border-radius: 14px;
-                color: #64748b;
-                font-size: 14px;
-                font-weight: 600;
-            }
-            """
-        )
-        preview_column.addWidget(self.preview_label, 1)
-
-        ocr_column = QVBoxLayout()
-        ocr_column.setSpacing(8)
-        ocr_title = QLabel("OCR 识别结果")
-        ocr_title.setObjectName("SectionTitle")
-        ocr_column.addWidget(ocr_title)
-
-        self.ocr_result_output = QTextBrowser()
-        self.ocr_result_output.setReadOnly(True)
-        self.ocr_result_output.setPlaceholderText(
-            "截图后的 OCR 结果将在这里显示，可用于提取数学公式或原文。"
-        )
-        self.ocr_result_output.setFixedHeight(unified_box_height)
-        ocr_column.addWidget(self.ocr_result_output, 1)
-
-        first_row.addLayout(preview_column, 1)
-        first_row.addLayout(ocr_column, 1)
-        layout.addLayout(first_row, 1)
-
-        shortcut_title = QLabel("快捷键与快捷操作")
-        shortcut_title.setObjectName("SectionTitle")
-        layout.addWidget(shortcut_title)
-
-        shortcut_row = QHBoxLayout()
-        shortcut_row.setSpacing(10)
-
-        self.refresh_shortcut_label = QLabel("刷新快捷键（全局）")
-        self.refresh_shortcut_label.setMinimumWidth(120)
-
-        self.refresh_shortcut_hint_label = QLabel()
-        self.refresh_shortcut_hint_label.setObjectName("Hint")
-
-        self.refresh_shortcut_input = ShortcutCaptureEdit(
-            self.refresh_shortcut_hint_label
-        )
-        self.refresh_shortcut_input.setKeySequence(DEFAULT_REFRESH_SHORTCUT)
-
-        shortcut_row.addWidget(self.refresh_shortcut_label)
-        shortcut_row.addWidget(self.refresh_shortcut_input, 1)
-        layout.addLayout(shortcut_row)
-        layout.addWidget(self.refresh_shortcut_hint_label)
-
-        self.copy_ocr_button = QPushButton("复制 OCR 结果")
-        self.copy_ocr_button.setObjectName("SecondaryButton")
-
-        self.ocr_enabled_button = QPushButton("OCR：开")
-        self.ocr_enabled_button.setObjectName("SecondaryButton")
-        self.ocr_enabled_button.setCheckable(True)
-        self.ocr_enabled_button.setChecked(True)
-        self.ocr_enabled_button.clicked.connect(self._update_ocr_enabled_button_text)
-
-        self.translation_enabled_button = QPushButton("翻译：开")
-        self.translation_enabled_button.setObjectName("SecondaryButton")
-        self.translation_enabled_button.setCheckable(True)
-        self.translation_enabled_button.setChecked(True)
-        self.translation_enabled_button.clicked.connect(
-            self._update_translation_enabled_button_text
-        )
-
-        self.save_button = QPushButton("保存配置")
-        self.save_button.setObjectName("SecondaryButton")
-
-        self.capture_button = QPushButton("框选")
-        self.capture_button.setObjectName("PrimaryButton")
-
-        self.clipboard_button = QPushButton("剪贴板自动处理：已关闭")
-        self.clipboard_button.setObjectName("SecondaryButton")
-        self.clipboard_button.setCheckable(True)
-
-        self.display_toggle_button = QPushButton("翻译显示区：已开启")
-        self.display_toggle_button.setObjectName("SecondaryButton")
-        self.display_toggle_button.setCheckable(True)
-        self.display_toggle_button.setChecked(True)
-
-        action_buttons = (
-            self.copy_ocr_button,
-            self.ocr_enabled_button,
-            self.translation_enabled_button,
-            self.save_button,
-            self.capture_button,
-            self.clipboard_button,
-            self.display_toggle_button,
-        )
-        for button in action_buttons:
-            button.setMinimumHeight(44)
-            button.setSizePolicy(
-                QSizePolicy.Policy.Expanding,
-                QSizePolicy.Policy.Fixed,
-            )
-
-        action_grid = QGridLayout()
-        action_grid.setHorizontalSpacing(10)
-        action_grid.setVerticalSpacing(10)
-        action_grid.setColumnStretch(0, 1)
-        action_grid.setColumnStretch(1, 1)
-        action_grid.setColumnStretch(2, 1)
-
-        toggle_pair_container = QWidget()
-        toggle_pair_layout = QHBoxLayout(toggle_pair_container)
-        toggle_pair_layout.setContentsMargins(0, 0, 0, 0)
-        toggle_pair_layout.setSpacing(6)
-        toggle_pair_layout.addWidget(self.ocr_enabled_button, 1)
-        toggle_pair_layout.addWidget(self.translation_enabled_button, 1)
-
-        action_grid.addWidget(self.capture_button, 0, 0)
-        action_grid.addWidget(self.copy_ocr_button, 0, 1)
-        action_grid.addWidget(self.save_button, 0, 2)
-        action_grid.addWidget(toggle_pair_container, 1, 0)
-        action_grid.addWidget(self.clipboard_button, 1, 1)
-        action_grid.addWidget(self.display_toggle_button, 1, 2)
-
-        layout.addLayout(action_grid)
-
-        return card
+        effect.setOpacity(0.0)
+        self._page_animation = QPropertyAnimation(effect, b"opacity", self)
+        self._page_animation.setDuration(180)
+        self._page_animation.setStartValue(0.0)
+        self._page_animation.setEndValue(1.0)
+        self._page_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._page_animation.start()
 
     def set_models_fetching(self, is_fetching: bool) -> None:
         """同步模型列表后台请求的按钮与输入控件状态。"""
@@ -555,29 +563,57 @@ class MainWindow(QMainWindow):
 
     def set_config_drawer_visible(self, is_visible: bool) -> None:
         self._is_config_drawer_open = bool(is_visible)
-        self.config_drawer_panel.setVisible(self._is_config_drawer_open)
-        self.drawer_toggle_button.setText(
-            "收起设置" if self._is_config_drawer_open else "展开设置"
-        )
-        self.drawer_toggle_button.setToolTip(
-            "收起当前配置抽屉"
-            if self._is_config_drawer_open
-            else "展开配置抽屉并编辑参数"
-        )
+        if self._is_config_drawer_open:
+            self.settings_dialog.show_page("api")
+            self.settings_dialog.open()
+            self.settings_dialog.raise_()
+            self.settings_dialog.activateWindow()
+            self.settings_button.setToolTip("设置窗口已打开")
+        else:
+            self.settings_dialog.hide()
+            self.settings_button.setToolTip("打开设置")
+
+    def _on_settings_dialog_finished(self, _result: int) -> None:
+        self._is_config_drawer_open = False
+        self.settings_button.setToolTip("打开设置")
+        self._sync_active_role_state()
+        self._refresh_overview_status()
+        self._refresh_shortcut_badges()
 
     def _open_config_drawer_for_role(self, role: str) -> None:
         self.switch_config_role(role)
         self.set_config_drawer_visible(True)
 
-    def _update_ocr_enabled_button_text(self) -> None:
-        self.ocr_enabled_button.setText(
-            "OCR：开" if self.ocr_enabled_button.isChecked() else "OCR：关"
+    def _update_ocr_enabled_button_text(self, *_args) -> None:
+        enabled = self.ocr_enabled_button.isChecked()
+        self.ocr_enabled_button.setText("OCR：开" if enabled else "OCR：关")
+        self.ocr_enabled_button.setToolTip(
+            "OCR 服务已开启" if enabled else "OCR 服务已关闭"
         )
+        self.ocr_status_pill.setText("开启" if enabled else "关闭")
+        self.ocr_status_pill.setTone("ok" if enabled else "default")
 
-    def _update_translation_enabled_button_text(self) -> None:
+    def _update_translation_enabled_button_text(self, *_args) -> None:
+        enabled = self.translation_enabled_button.isChecked()
         self.translation_enabled_button.setText(
-            "翻译：开" if self.translation_enabled_button.isChecked() else "翻译：关"
+            "翻译：开" if enabled else "翻译：关"
         )
+        self.translation_enabled_button.setToolTip(
+            "翻译服务已开启" if enabled else "翻译服务已关闭"
+        )
+        self.translation_status_pill.setText("开启" if enabled else "关闭")
+        self.translation_status_pill.setTone("ok" if enabled else "default")
+
+    def _update_display_status_text(self, *_args) -> None:
+        visible = self.display_toggle_button.isChecked()
+        self.display_toggle_button.setText(
+            "翻译显示：已开启" if visible else "翻译显示：已关闭"
+        )
+        self.display_toggle_button.setToolTip(
+            "悬浮字幕已显示" if visible else "悬浮字幕已隐藏"
+        )
+        self.display_status_pill.setText("可见" if visible else "隐藏")
+        self.display_status_pill.setTone("ok" if visible else "default")
 
     def _clone_api_config(self, api_config: ApiConfig) -> ApiConfig:
         return ApiConfig(
@@ -667,7 +703,8 @@ class MainWindow(QMainWindow):
 
         if self._active_config_role == "ocr":
             self._ocr_prompt_template = (
-                self.prompt_input.toPlainText().strip() or DEFAULT_OCR_PROMPT_TEMPLATE
+                self.prompt_input.toPlainText().strip()
+                or DEFAULT_OCR_PROMPT_TEMPLATE
             )
         else:
             self._target_language = (
@@ -686,44 +723,28 @@ class MainWindow(QMainWindow):
             self._sync_active_role_state()
 
         self._active_config_role = role
-        self.ocr_mode_button.setChecked(role == "ocr")
-        self.translation_mode_button.setChecked(role == "translation")
+        self.settings_dialog.role_segment.setCurrentKey(role, emit_signal=False)
 
         if role == "ocr":
-            self.config_title_label.setText("识别配置")
-            self.config_desc_label.setText(
-                "这里配置 OCR 识别模型。截图后会先使用该模型提取图片中的原文或公式。"
+            self.settings_dialog.role_context_label.setText(
+                "正在编辑 OCR 识别服务"
             )
-            self.top_mode_hint_label.setText(
-                "当前正在编辑 OCR 识别配置。可通过顶部抽屉按钮收起/展开设置。"
-            )
-            self.api_profile_list_label.setText("已保存 OCR 配置")
-            self.api_profile_name_label.setText("OCR 配置名称")
-            self.api_section_title_label.setText("当前 OCR API 连接参数")
-            self.prompt_label.setText("OCR 提示词（Prompt）")
+            self.settings_dialog.prompt_role_pill.setText("OCR 识别")
+            self.prompt_label.setText("OCR 提示词")
             self.prompt_input.setPlainText(
                 self._ocr_prompt_template or DEFAULT_OCR_PROMPT_TEMPLATE
             )
-            self.target_language_label.hide()
-            self.target_language_input.hide()
+            self.settings_dialog.target_language_row.hide()
             self.fetch_models_button.setToolTip("拉取 OCR 模型列表")
         else:
-            self.config_title_label.setText("翻译配置")
-            self.config_desc_label.setText(
-                "这里配置翻译模型。仅当“翻译功能”开启时，才会继续送入该模型翻译。"
-            )
-            self.top_mode_hint_label.setText(
-                "当前正在编辑翻译配置。可通过顶部抽屉按钮收起/展开设置。"
-            )
-            self.api_profile_list_label.setText("已保存翻译配置")
-            self.api_profile_name_label.setText("翻译配置名称")
-            self.api_section_title_label.setText("当前翻译 API 连接参数")
-            self.prompt_label.setText("翻译提示词（Prompt）")
+            self.settings_dialog.role_context_label.setText("正在编辑翻译服务")
+            self.settings_dialog.prompt_role_pill.setText("翻译")
+            self.prompt_label.setText("翻译提示词")
             self.prompt_input.setPlainText(
-                self._translation_prompt_template or DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+                self._translation_prompt_template
+                or DEFAULT_TRANSLATION_PROMPT_TEMPLATE
             )
-            self.target_language_label.show()
-            self.target_language_input.show()
+            self.settings_dialog.target_language_row.show()
             self.target_language_input.setText(self._target_language)
             self.fetch_models_button.setToolTip("拉取翻译模型列表")
 
@@ -731,6 +752,7 @@ class MainWindow(QMainWindow):
         self._apply_api_profile_to_fields(
             self._get_selected_api_profile_from_role(self._active_config_role)
         )
+        self._refresh_overview_status()
 
     def get_selected_api_profile_id(self) -> str:
         current_data = self.api_profile_combo.currentData()
@@ -751,6 +773,7 @@ class MainWindow(QMainWindow):
         self._apply_api_profile_to_fields(
             self._get_selected_api_profile_from_role(self._active_config_role)
         )
+        self._refresh_overview_status()
 
     def create_api_profile(self) -> None:
         self._sync_active_role_state()
@@ -767,6 +790,7 @@ class MainWindow(QMainWindow):
         )
         self._refresh_api_profile_combo()
         self._apply_api_profile_to_fields(new_profile)
+        self._refresh_overview_status()
 
     def update_current_api_profile(self) -> None:
         self._sync_active_role_state()
@@ -774,6 +798,7 @@ class MainWindow(QMainWindow):
         self._apply_api_profile_to_fields(
             self._get_selected_api_profile_from_role(self._active_config_role)
         )
+        self._refresh_overview_status()
 
     def delete_current_api_profile(self) -> None:
         self._sync_active_role_state()
@@ -799,6 +824,7 @@ class MainWindow(QMainWindow):
         self._apply_api_profile_to_fields(
             self._get_selected_api_profile_from_role(self._active_config_role)
         )
+        self._refresh_overview_status()
 
     def toggle_api_key_visibility(self) -> None:
         is_password_mode = self.api_key_input.echoMode() == QLineEdit.EchoMode.Password
@@ -807,17 +833,13 @@ class MainWindow(QMainWindow):
             if is_password_mode
             else QLineEdit.EchoMode.Password
         )
-        self.toggle_api_key_button.setText(
-            "隐藏密钥" if is_password_mode else "显示密钥"
-        )
+        self.toggle_api_key_button.setText("隐藏" if is_password_mode else "显示")
 
     def set_display_visible(self, is_visible: bool) -> None:
         self.display_toggle_button.blockSignals(True)
         self.display_toggle_button.setChecked(is_visible)
         self.display_toggle_button.blockSignals(False)
-        self.display_toggle_button.setText(
-            "翻译显示：已开启" if is_visible else "翻译显示：已关闭"
-        )
+        self._update_display_status_text()
 
     def set_ocr_enabled(self, enabled: bool) -> None:
         self.ocr_enabled_button.blockSignals(True)
@@ -831,9 +853,49 @@ class MainWindow(QMainWindow):
         self.translation_enabled_button.blockSignals(False)
         self._update_translation_enabled_button_text()
 
+    def _refresh_overview_status(self) -> None:
+        ocr_profile = self._get_selected_api_profile_from_role("ocr")
+        translation_profile = self._get_selected_api_profile_from_role("translation")
+
+        self.ocr_profile_summary_label.setText(
+            ocr_profile.profile_name.strip() or DEFAULT_API_PROFILE_NAME
+        )
+        self.ocr_model_summary_label.setText(
+            ocr_profile.model_name.strip() or "未选择模型"
+        )
+        self.translation_profile_summary_label.setText(
+            translation_profile.profile_name.strip() or DEFAULT_API_PROFILE_NAME
+        )
+        self.translation_model_summary_label.setText(
+            translation_profile.model_name.strip() or "未选择模型"
+        )
+        self._update_ocr_enabled_button_text()
+        self._update_translation_enabled_button_text()
+        self._update_display_status_text()
+
+    def _refresh_shortcut_badges(self) -> None:
+        while self.shortcut_kbd_layout.count():
+            item = self.shortcut_kbd_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        shortcut = (
+            self.refresh_shortcut_input.keySequence().toString().strip()
+            or DEFAULT_REFRESH_SHORTCUT
+        )
+        keys = [part.strip() for part in shortcut.split("+") if part.strip()]
+        if not keys:
+            keys = [DEFAULT_REFRESH_SHORTCUT]
+
+        for index, key in enumerate(keys):
+            if index:
+                plus = QLabel("+")
+                plus.setObjectName("Muted")
+                self.shortcut_kbd_layout.addWidget(plus)
+            self.shortcut_kbd_layout.addWidget(KbdBadge(key))
+
     def update_ocr_result(self, text: str) -> None:
-        # 保存模型返回的原始纯文本，避免 Markdown 渲染过程中的格式占位符
-        # 影响“复制 OCR 结果”；展示层仍保留 Markdown 与逐行换行。
         self._ocr_result_text = text.strip()
         self.ocr_result_output.setMarkdown(
             render_markdown_preserving_line_breaks(self._ocr_result_text)
@@ -853,19 +915,18 @@ class MainWindow(QMainWindow):
             self._clone_api_config(item) for item in config.ocr_api_configs
         ]
         self._selected_ocr_api_config_id = config.selected_ocr_api_config_id
-
         self._translation_api_configs = [
             self._clone_api_config(item) for item in config.translation_api_configs
         ]
         self._selected_translation_api_config_id = (
             config.selected_translation_api_config_id
         )
-
         self._ocr_prompt_template = (
             config.ocr_prompt_template or DEFAULT_OCR_PROMPT_TEMPLATE
         )
         self._translation_prompt_template = (
-            config.translation_prompt_template or DEFAULT_TRANSLATION_PROMPT_TEMPLATE
+            config.translation_prompt_template
+            or DEFAULT_TRANSLATION_PROMPT_TEMPLATE
         )
         self._target_language = config.target_language or "简体中文"
 
@@ -874,8 +935,9 @@ class MainWindow(QMainWindow):
         self.refresh_shortcut_input.setKeySequence(
             config.refresh_shortcut or DEFAULT_REFRESH_SHORTCUT
         )
-
         self.switch_config_role(self._active_config_role, save_current=False)
+        self._refresh_shortcut_badges()
+        self._refresh_overview_status()
 
     def get_config(self) -> AppConfig:
         self._sync_active_role_state()
@@ -886,7 +948,8 @@ class MainWindow(QMainWindow):
             ],
             selected_ocr_api_config_id=self._selected_ocr_api_config_id,
             translation_api_configs=[
-                self._clone_api_config(item) for item in self._translation_api_configs
+                self._clone_api_config(item)
+                for item in self._translation_api_configs
             ],
             selected_translation_api_config_id=self._selected_translation_api_config_id,
             ocr_enabled=self.ocr_enabled_button.isChecked(),
@@ -906,11 +969,18 @@ class MainWindow(QMainWindow):
 
     def update_preview(self, pixmap: QPixmap) -> None:
         if pixmap.isNull():
+            self._preview_source_pixmap = QPixmap()
             self.preview_label.setText("尚无截图预览")
             self.preview_label.setPixmap(QPixmap())
             return
 
-        scaled = pixmap.scaled(
+        self._preview_source_pixmap = QPixmap(pixmap)
+        self._render_preview()
+
+    def _render_preview(self) -> None:
+        if self._preview_source_pixmap.isNull():
+            return
+        scaled = self._preview_source_pixmap.scaled(
             self.preview_label.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
@@ -919,47 +989,55 @@ class MainWindow(QMainWindow):
         self.preview_label.setPixmap(scaled)
 
     def _update_toast_position(self) -> None:
-        if not hasattr(self, "_toast_label"):
-            return
-
         text = self._toast_label.text().strip()
         if not text:
             return
 
         font_metrics = QFontMetrics(self._toast_label.font())
         horizontal_padding = 38
-        max_width = max(220, self.width() - 40)
+        max_width = max(220, self.width() - 44)
         preferred_width = font_metrics.horizontalAdvance(text) + horizontal_padding
-
         use_single_line = preferred_width <= max_width
         self._toast_label.setWordWrap(not use_single_line)
-
-        if use_single_line:
-            self._toast_label.setFixedWidth(preferred_width)
-        else:
-            self._toast_label.setFixedWidth(max_width)
-
+        self._toast_label.setFixedWidth(
+            preferred_width if use_single_line else max_width
+        )
         self._toast_label.adjustSize()
 
-        x = max(20, (self.width() - self._toast_label.width()) // 2)
-        y = max(20, self.height() - self._toast_label.height() - 28)
+        x = max(22, (self.width() - self._toast_label.width()) // 2)
+        y = max(22, self.height() - self._toast_label.height() - 58)
         self._toast_label.move(x, y)
+
+    def _hide_toast(self) -> None:
+        if not self._toast_label.isVisible():
+            return
+        self._toast_fade_in.stop()
+        self._toast_fade_out.stop()
+        self._toast_fade_out.setStartValue(self._toast_opacity.opacity())
+        self._toast_fade_out.setEndValue(0.0)
+        self._toast_fade_out.start()
 
     def show_toast(self, message: str, duration_ms: int = 2200) -> None:
         text = message.strip()
         if not text:
             return
 
+        self._toast_hide_timer.stop()
+        self._toast_fade_out.stop()
+        self._toast_fade_in.stop()
         self._toast_label.setText(text)
         self._update_toast_position()
+        self._toast_opacity.setOpacity(0.0)
         self._toast_label.show()
         self._toast_label.raise_()
+        self._toast_fade_in.setStartValue(0.0)
+        self._toast_fade_in.setEndValue(1.0)
+        self._toast_fade_in.start()
         self._toast_hide_timer.start(max(800, int(duration_ms)))
 
     def resizeEvent(self, event) -> None:
-        current_pixmap = self.preview_label.pixmap()
-        if current_pixmap is not None and not current_pixmap.isNull():
-            self.update_preview(current_pixmap)
+        if hasattr(self, "preview_label") and not self._preview_source_pixmap.isNull():
+            self._render_preview()
         if hasattr(self, "_toast_label") and self._toast_label.isVisible():
             self._update_toast_position()
         super().resizeEvent(event)
