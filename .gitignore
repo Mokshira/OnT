@@ -29,7 +29,6 @@ config.json
 .codex/
 .idea/
 .tests/
-tests/
 *.swp
 .DS_Store
 Thumbs.db
