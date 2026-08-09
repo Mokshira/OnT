@@ -64,6 +64,7 @@ class AppController(QObject):
         self._models_fetch_thread: Optional[QThread] = None
         self._models_fetch_worker: Optional[ModelsFetchWorker] = None
         self._models_fetch_role: Optional[str] = None
+        self._models_fetch_profile_id: str = ""
         self._models_fetch_current_model = ""
         self._models_fetch_url = ""
         self._last_clipboard_image_hash: Optional[str] = None
@@ -354,6 +355,7 @@ class AppController(QObject):
             self._models_fetch_thread = thread
             self._models_fetch_worker = worker
             self._models_fetch_role = role
+            self._models_fetch_profile_id = api_config.profile_id
             self._models_fetch_current_model = api_config.model_name
             self._models_fetch_url = models_url
 
@@ -386,6 +388,24 @@ class AppController(QObject):
     def on_models_fetch_success(self, model_names: list[str]) -> None:
         if self._is_quitting:
             return
+
+        role_name = "OCR" if self._models_fetch_role == "ocr" else "翻译"
+
+        # 结果只允许落到发起拉取时的角色与 Profile 上。UI 会锁定切换
+        # 入口；这里继续兜底任何编程式切换，目标变化时直接丢弃结果。
+        is_same_target = (
+            self.main_window.get_active_config_role() == self._models_fetch_role
+            and self.main_window.get_selected_api_profile_id()
+            == self._models_fetch_profile_id
+        )
+        if not is_same_target:
+            self._show_info(
+                "已忽略拉取结果",
+                f"模型列表已返回，但当前编辑目标已不是发起拉取时的{role_name}配置，"
+                "结果已丢弃。请切回原配置后重新拉取。",
+            )
+            return
+
         current_model = self._models_fetch_current_model
         self.main_window.model_name_combo.clear()
         self.main_window.model_name_combo.addItems(model_names)
@@ -395,7 +415,6 @@ class AppController(QObject):
         else:
             self.main_window.model_name_combo.setCurrentText(model_names[0])
 
-        role_name = "OCR" if self._models_fetch_role == "ocr" else "翻译"
         self._show_info(
             "获取成功",
             f"已从 {self._models_fetch_url} 获取到 {len(model_names)} 个{role_name}模型。",
@@ -427,6 +446,7 @@ class AppController(QObject):
         self._models_fetch_thread = None
         self._models_fetch_worker = None
         self._models_fetch_role = None
+        self._models_fetch_profile_id = ""
         self._models_fetch_current_model = ""
         self._models_fetch_url = ""
 

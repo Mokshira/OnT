@@ -547,13 +547,22 @@ class MainWindow(QMainWindow):
         self._page_animation.start()
 
     def set_models_fetching(self, is_fetching: bool) -> None:
-        """同步模型列表后台请求的按钮与输入控件状态。"""
+        """同步模型拉取状态，并锁定所有会改变结果绑定目标的入口。"""
         self.fetch_models_button.setEnabled(not is_fetching)
         self.fetch_models_button.setText("正在拉取…" if is_fetching else "拉取模型")
         self.cancel_fetch_models_button.setVisible(is_fetching)
         self.cancel_fetch_models_button.setEnabled(is_fetching)
         self.cancel_fetch_models_button.setText("取消")
         self.model_name_combo.setEnabled(not is_fetching)
+
+        lock_tooltip = "模型拉取进行中，完成或取消后才能切换" if is_fetching else ""
+        self.settings_dialog.role_segment.setEnabled(not is_fetching)
+        self.settings_dialog.role_segment.setToolTip(lock_tooltip)
+        self.api_profile_combo.setEnabled(not is_fetching)
+        self.api_profile_combo.setToolTip(lock_tooltip)
+        self.add_api_profile_button.setEnabled(not is_fetching)
+        self.update_api_profile_button.setEnabled(not is_fetching)
+        self.delete_api_profile_button.setEnabled(not is_fetching)
 
     def set_models_fetch_cancelling(self) -> None:
         """取消已发出，保留禁用状态直到后台线程退出。"""
