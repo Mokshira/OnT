@@ -633,6 +633,20 @@ class MainWindow(QMainWindow):
             model_name=api_config.model_name,
         )
 
+    def get_api_profiles_snapshot(
+        self,
+    ) -> tuple[list[ApiConfig], str, list[ApiConfig], str]:
+        """返回两组 Profile 列表及选中 ID 的独立克隆快照。"""
+        return (
+            [self._clone_api_config(item) for item in self._ocr_api_configs],
+            self._selected_ocr_api_config_id,
+            [
+                self._clone_api_config(item)
+                for item in self._translation_api_configs
+            ],
+            self._selected_translation_api_config_id,
+        )
+
     def get_active_config_role(self) -> str:
         return self._active_config_role
 

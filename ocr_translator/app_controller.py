@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from PIL import Image
 from PyQt6.QtCore import (
@@ -48,9 +49,10 @@ class AppController(QObject):
     截图/剪贴板图片 -> OCR / 翻译（按开关独立执行，可并行）
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config_manager: ConfigManager | None = None) -> None:
         super().__init__()
-        self.config_manager = ConfigManager()
+        self.config_manager = config_manager or ConfigManager()
+        self._persisted_config: AppConfig = AppConfig()
         self.main_window = MainWindow()
         self.floating_window = FloatingSubtitleWindow()
         self.capture_overlay = ScreenCaptureOverlay()
@@ -155,6 +157,12 @@ class AppController(QObject):
         self.main_window.display_toggle_button.toggled.connect(
             self.on_display_visibility_toggled
         )
+        self.main_window.ocr_enabled_button.toggled.connect(
+            self.on_service_enabled_toggled
+        )
+        self.main_window.translation_enabled_button.toggled.connect(
+            self.on_service_enabled_toggled
+        )
         self.main_window.copy_ocr_button.clicked.connect(self.copy_ocr_result)
         self.main_window.closing.connect(self.on_main_window_closing)
 
@@ -205,6 +213,10 @@ class AppController(QObject):
             self.floating_window.apply_appearance_config(config)
             self._setup_shortcuts(config.refresh_shortcut)
 
+        # 缓存实际已加载并成功注册快捷键的生效配置。回退分支中的快捷键
+        # 已改为默认值，因此后续范围化写盘会让磁盘与实际注册状态收敛。
+        self._persisted_config = config
+
     def _build_config_from_ui(self) -> AppConfig:
         config = self.main_window.get_config()
 
@@ -218,24 +230,51 @@ class AppController(QObject):
         config.ensure_valid_state()
         return config
 
-    def _persist_config_without_validation(self) -> AppConfig:
-        config = self._build_config_from_ui()
-        self.config_manager.save(config)
-        self.main_window.set_config(config)
-        self.floating_window.apply_appearance_config(config)
+    def _clone_config(self, config: AppConfig) -> AppConfig:
+        """深拷贝配置，避免缓存、运行时快照与在途请求互相污染。"""
+        return copy.deepcopy(config)
+
+    def _build_runtime_config(self) -> AppConfig:
+        """构建截图、热键与剪贴板路径使用的只读生效配置。"""
+        config = self._clone_config(self._persisted_config)
+
+        for api_config in config.ocr_api_configs:
+            api_config.base_url = normalize_base_url(api_config.base_url)
+
+        for api_config in config.translation_api_configs:
+            api_config.base_url = normalize_base_url(api_config.base_url)
+
+        config.ensure_valid_state()
+        self._validate_config(config, allow_empty_api_for_save=False)
         return config
 
-    def _validate_and_persist_config(
+    def _persist_scoped_config(
         self,
-        *,
-        allow_empty_api_for_save: bool,
+        apply_changes: Callable[[AppConfig], None],
     ) -> AppConfig:
-        config = self._build_config_from_ui()
-        self._validate_config(config, allow_empty_api_for_save=allow_empty_api_for_save)
+        """以生效配置为基底，仅合入调用方拥有的字段并写盘。"""
+        config = self._clone_config(self._persisted_config)
+        apply_changes(config)
+        config.ensure_valid_state()
         self.config_manager.save(config)
-        self.main_window.set_config(config)
-        self.floating_window.apply_appearance_config(config)
+        self._persisted_config = config
         return config
+
+    def _persist_api_profiles(self) -> AppConfig:
+        """Profile 增删改后，只保存两组 Profile 与各自选中 ID。"""
+        ocr_configs, ocr_id, translation_configs, translation_id = (
+            self.main_window.get_api_profiles_snapshot()
+        )
+        for api_config in ocr_configs + translation_configs:
+            api_config.base_url = normalize_base_url(api_config.base_url)
+
+        def _apply(config: AppConfig) -> None:
+            config.ocr_api_configs = ocr_configs
+            config.selected_ocr_api_config_id = ocr_id
+            config.translation_api_configs = translation_configs
+            config.selected_translation_api_config_id = translation_id
+
+        return self._persist_scoped_config(_apply)
 
     def save_config(self) -> None:
         """
@@ -266,6 +305,7 @@ class AppController(QObject):
 
             # 快捷键已切换成功，此时才允许写盘。
             self.config_manager.save(new_config)
+            self._persisted_config = new_config
             self.main_window.set_config(new_config)
             self.floating_window.apply_appearance_config(new_config)
             self._show_info("保存成功", "OCR 与翻译配置已成功保存到本地。")
@@ -282,6 +322,7 @@ class AppController(QObject):
             # 这里重新加载磁盘配置，避免回滚时使用已变更的内存对象。
             try:
                 restored_config = self.config_manager.load()
+                self._persisted_config = restored_config
                 self.main_window.set_config(restored_config)
                 self.floating_window.apply_appearance_config(restored_config)
             except Exception as rollback_exc:
@@ -297,7 +338,7 @@ class AppController(QObject):
             role = self.main_window.get_active_config_role()
             role_name = "OCR" if role == "ocr" else "翻译"
             self.main_window.create_api_profile()
-            self._persist_config_without_validation()
+            self._persist_api_profiles()
             self._show_info("新增成功", f"已新增{role_name}配置。")
         except Exception as exc:
             self._show_error("新增配置失败", str(exc))
@@ -307,7 +348,7 @@ class AppController(QObject):
             role = self.main_window.get_active_config_role()
             role_name = "OCR" if role == "ocr" else "翻译"
             self.main_window.update_current_api_profile()
-            self._persist_config_without_validation()
+            self._persist_api_profiles()
             self._show_info("更新成功", f"已更新当前{role_name}配置。")
         except Exception as exc:
             self._show_error("更新配置失败", str(exc))
@@ -317,10 +358,32 @@ class AppController(QObject):
             role = self.main_window.get_active_config_role()
             role_name = "OCR" if role == "ocr" else "翻译"
             self.main_window.delete_current_api_profile()
-            self._persist_config_without_validation()
+            self._persist_api_profiles()
             self._show_info("删除成功", f"已删除当前{role_name}配置。")
         except Exception as exc:
             self._show_error("删除配置失败", str(exc))
+
+    def on_service_enabled_toggled(self, _checked: bool = False) -> None:
+        """概览页 OCR / 翻译开关：立即范围化保存自身状态。"""
+        if self._is_quitting:
+            return
+
+        ocr_enabled = self.main_window.ocr_enabled_button.isChecked()
+        translation_enabled = (
+            self.main_window.translation_enabled_button.isChecked()
+        )
+
+        def _apply(config: AppConfig) -> None:
+            config.ocr_enabled = ocr_enabled
+            config.translation_enabled = translation_enabled
+
+        try:
+            self._persist_scoped_config(_apply)
+        except Exception as exc:
+            self._show_info(
+                "保存失败",
+                f"服务开关状态未能写入配置文件：{exc}",
+            )
 
     def fetch_models(self) -> None:
         """在专用后台线程中拉取当前 Profile 的模型列表。"""
@@ -460,7 +523,7 @@ class AppController(QObject):
             if self._has_active_requests():
                 raise ValueError("已有 OCR / 翻译任务正在处理中，请稍候。")
 
-            self._validate_and_persist_config(allow_empty_api_for_save=False)
+            self._build_runtime_config()
             self.selection_frame_overlay.hide()
             self.main_window.hide()
             self.capture_overlay.start_capture()
@@ -588,7 +651,7 @@ class AppController(QObject):
 
         try:
             image_base64 = image_to_base64(result.image)
-            config = self._validate_and_persist_config(allow_empty_api_for_save=False)
+            config = self._build_runtime_config()
 
             if not config.ocr_enabled and not config.translation_enabled:
                 self.main_window.update_ocr_result("OCR 与翻译均已关闭。")
@@ -703,7 +766,9 @@ class AppController(QObject):
         if self._appearance_save_timer.isActive():
             self._appearance_save_timer.stop()
             try:
-                self._persist_config_without_validation()
+                self._persist_scoped_config(
+                    self.floating_window.fill_appearance_config
+                )
             except Exception:
                 pass
 
@@ -844,7 +909,9 @@ class AppController(QObject):
         if self._is_quitting:
             return
         try:
-            self._persist_config_without_validation()
+            self._persist_scoped_config(
+                self.floating_window.fill_appearance_config
+            )
         except Exception as exc:
             self._show_error("保存展示区样式失败", str(exc))
 
@@ -873,7 +940,7 @@ class AppController(QObject):
             if self._has_active_requests():
                 return
 
-            config = self._validate_and_persist_config(allow_empty_api_for_save=False)
+            config = self._build_runtime_config()
             pil_image, pixmap = self._get_image_from_clipboard()
             image_base64 = image_to_base64(pil_image)
             image_hash = hashlib.sha256(image_base64.encode("utf-8")).hexdigest()
