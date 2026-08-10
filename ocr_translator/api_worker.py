@@ -8,6 +8,7 @@ import requests
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from .config_manager import ApiConfig
+from .stream_utils import PartialTextCoalescer
 
 
 class ApiWorker(QObject):
@@ -17,7 +18,10 @@ class ApiWorker(QObject):
     - 翻译：文本 + 翻译 Prompt
 
     生命周期约定：
-    - `finished(str)` 只表示业务成功结果；
+    - `partial_text(str)` 携带自上次发射以来的增量文本（delta，而非
+      全量累计文本），由 PartialTextCoalescer 在工作线程内按时间片
+      合并后发射，发射频率与 chunk 数解耦；
+    - `finished(str)` 只表示业务成功结果（完整文本只在流结束时 join 一次）；
     - `done()` 在 run() 的最外层 finally 发出，每次运行恰好一次；
     - `cancel()` 线程安全且幂等，可打断阻塞中的网络读取。
     """
@@ -45,6 +49,11 @@ class ApiWorker(QObject):
         self._http_lock = threading.Lock()
         self._session: requests.Session | None = None
         self._response: requests.Response | None = None
+
+        # 流式增量在工作线程内按时间片合并后再发射 partial_text，
+        # 把跨线程信号从“每 chunk 一次”降为“每个时间片最多一次”，
+        # 且只携带增量文本（delta），不再反复 join 全量文本。
+        self._partial_coalescer = PartialTextCoalescer(self.partial_text.emit)
 
     def cancel(self) -> None:
         """
@@ -138,9 +147,12 @@ class ApiWorker(QObject):
 
             result_text = self._extract_response_text(
                 response,
-                progress_callback=self.partial_text.emit,
+                progress_callback=self._partial_coalescer.add,
                 should_cancel=self._cancelled.is_set,
             )
+            # 流结束后强制刷出不足一个时间片的尾部增量，
+            # 避免最后几个字符要等到 finished 整页渲染才出现。
+            self._partial_coalescer.flush()
 
             if self._cancelled.is_set():
                 return
@@ -254,6 +266,14 @@ class ApiWorker(QObject):
         progress_callback: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
     ) -> str:
+        """
+        逐行解析 SSE 流。
+
+        progress_callback 采用增量（delta）语义：每次只携带当前 chunk
+        新增的文本，绝不携带全量累计文本（旧实现每个 chunk 对全部累计
+        文本 join 一次，累计成本 O(n²)）；完整文本由返回值在流结束时
+        一次性 join 给出。
+        """
         text_parts: list[str] = []
 
         for raw_line in response.iter_lines(decode_unicode=False):
@@ -302,15 +322,21 @@ class ApiWorker(QObject):
                     if should_cancel is not None and should_cancel():
                         return ""
                     if progress_callback is not None:
-                        progress_callback("".join(text_parts))
+                        # 只回调本次增量（delta）。旧实现在这里对全部累计
+                        # 文本做 "".join() 并整体发出，每个 chunk 一次，
+                        # 累计拼接成本 O(n²)，长输出时是 UI 卡顿的根源。
+                        progress_callback(extracted)
                 elif isinstance(content, str) and content.strip() == "":
                     # 仅含空白字符（如 "\n"、" "）的流式增量同样携带结构信息，
                     # 必须原样拼接，否则模型拆分在独立 chunk 中的换行会丢失，
-                    # 空白行（\n\n）会被吞成单个换行。此类 chunk 不触发进度刷新，
-                    # 等下一个含可见字符的 chunk 一并发出即可。
+                    # 空白行（\n\n）会被吞成单个换行。空白增量同样按 delta
+                    # 回调，由 PartialTextCoalescer 按时间片合并，不会造成
+                    # 逐 chunk 的 UI 刷新。
                     text_parts.append(content)
                     if should_cancel is not None and should_cancel():
                         return ""
+                    if progress_callback is not None:
+                        progress_callback(content)
 
         return "".join(text_parts).strip()
 

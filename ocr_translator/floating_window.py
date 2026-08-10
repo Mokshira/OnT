@@ -10,6 +10,7 @@ from PyQt6.QtGui import (
     QMouseEvent,
     QPainter,
     QPen,
+    QTextCursor,
 )
 from PyQt6.QtWidgets import (
     QColorDialog,
@@ -71,6 +72,7 @@ class FloatingSubtitleWindow(QWidget):
         self._background_color = QColor("#000000")
         self._background_opacity = 24
         self._plain_text = "翻译结果将在这里显示"
+        self._is_streaming = False
         self._is_applying_appearance = False
         self._setup_window()
         self._setup_ui()
@@ -321,13 +323,51 @@ class FloatingSubtitleWindow(QWidget):
         self._update_background_geometry()
 
     def set_text(self, text: str) -> None:
+        # 完整渲染入口：占位提示、错误提示与最终结果都走这里。
         # 使用 QTextBrowser.setMarkdown 渲染翻译结果，支持 Markdown 排版；
         # 同时把单个换行转换为 Markdown 硬换行，保留图片中的段落结构；
         # 状态提示等非 Markdown 纯文本也能原样显示，不受影响。
+        # 流式增量不再走此方法（见 append_stream_text），因此一次请求中
+        # 全文 Markdown 解析渲染只发生一次（请求结束时）。
+        self._is_streaming = False
         content = text.strip() or "翻译结果将在这里显示"
         self._plain_text = content
         self.text_label.setMarkdown(render_markdown_preserving_line_breaks(content))
         self.text_label.verticalScrollBar().setValue(0)
+
+    def begin_stream_display(self) -> None:
+        """进入流式显示模式：清空旧内容，等待纯文本增量追加。"""
+        self._is_streaming = True
+        self._plain_text = ""
+        self.text_label.clear()
+        self.text_label.verticalScrollBar().setValue(0)
+
+    def append_stream_text(self, delta: str) -> None:
+        """
+        在文档末尾以纯文本方式追加一段流式增量。
+
+        QTextDocument 的 setMarkdown 没有增量接口，流式期间逐 chunk 全文
+        重排是长输出卡顿、拖影与滚动条抖动的根源；这里改用 QTextCursor
+        在尾部 insertText，单次代价只与增量长度成正比。滚动条仅在原本
+        就位于底部时跟随新内容，用户上滚阅读时不再被强制复位。
+        请求完成后由 set_text 对最终全文做一次 Markdown 渲染。
+        """
+        if not delta:
+            return
+        if not self._is_streaming:
+            self.begin_stream_display()
+
+        self._plain_text += delta
+
+        scroll_bar = self.text_label.verticalScrollBar()
+        should_follow_tail = scroll_bar.value() >= scroll_bar.maximum() - 4
+
+        cursor = QTextCursor(self.text_label.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(delta)
+
+        if should_follow_tail:
+            scroll_bar.setValue(scroll_bar.maximum())
 
     def _emit_appearance_changed(self) -> None:
         if not self._is_applying_appearance:

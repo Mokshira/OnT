@@ -41,6 +41,7 @@ from .screenshot_tool import (
     SelectionFrameOverlay,
     capture_region,
 )
+from .stream_utils import StreamStartGate
 
 
 class AppController(QObject):
@@ -63,6 +64,9 @@ class AppController(QObject):
         self._selection_frame_visible = True
         self._request_threads: dict[str, QThread] = {}
         self._request_workers: dict[str, ApiWorker] = {}
+        # 每类请求的流式起始门控：首个可见字符出现前保持占位提示，
+        # 之后切换为增量追加显示（配合 ApiWorker.partial_text 的 delta 语义）。
+        self._stream_gates: dict[str, StreamStartGate] = {}
         self._models_fetch_thread: Optional[QThread] = None
         self._models_fetch_worker: Optional[ModelsFetchWorker] = None
         self._models_fetch_role: Optional[str] = None
@@ -602,6 +606,7 @@ class AppController(QObject):
 
         self._request_threads.pop(request_kind, None)
         self._request_workers.pop(request_kind, None)
+        self._stream_gates.pop(request_kind, None)
         self._maybe_finish_shutdown()
 
     def _find_request_kind_for_worker(self, worker: object) -> Optional[str]:
@@ -1011,6 +1016,7 @@ class AppController(QObject):
 
         self._request_threads[request_kind] = thread
         self._request_workers[request_kind] = worker
+        self._stream_gates[request_kind] = StreamStartGate()
 
         # 全部连接必须在 thread.start() 前完成。
         thread.started.connect(worker.run)
@@ -1027,22 +1033,45 @@ class AppController(QObject):
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
-    def on_api_partial_text(self, request_kind: str, text: str) -> None:
+    def on_api_partial_text(self, request_kind: str, delta: str) -> None:
+        """
+        处理流式增量文本。
+
+        ApiWorker.partial_text 携带增量（delta）而非全量累计文本：
+        - 出现首个可见字符前，门控返回 None，占位提示保持不变；
+        - 之后增量以纯文本方式追加到对应窗口（不做全文 Markdown 重排，
+          也不重置滚动条）；
+        - 请求结束时 on_api_success / on_api_error 再做一次完整渲染。
+        """
         if self._is_quitting:
             return
-        preview_text = text.strip()
-        if request_kind == "ocr":
-            self.main_window.update_ocr_result(
-                preview_text or "正在执行 OCR 识别，请稍候..."
-            )
+        if request_kind not in ("ocr", "translation"):
             return
 
-        if request_kind == "translation":
-            self.floating_window.set_text(preview_text or "正在翻译，请稍候...")
+        gate = self._stream_gates.get(request_kind)
+        if gate is None:
+            gate = StreamStartGate()
+            self._stream_gates[request_kind] = gate
+
+        was_started = gate.started
+        visible_delta = gate.feed(delta)
+        if visible_delta is None:
+            return
+
+        if request_kind == "ocr":
+            if not was_started:
+                self.main_window.begin_ocr_stream()
+            self.main_window.append_ocr_stream_text(visible_delta)
+            return
+
+        if not was_started:
+            self.floating_window.begin_stream_display()
+        self.floating_window.append_stream_text(visible_delta)
 
     def on_api_success(self, request_kind: str, text: str) -> None:
         if self._is_quitting:
             return
+        self._stream_gates.pop(request_kind, None)
         if request_kind == "ocr":
             self.main_window.update_ocr_result(text)
             return
@@ -1053,6 +1082,7 @@ class AppController(QObject):
     def on_api_error(self, request_kind: str, message: str) -> None:
         if self._is_quitting:
             return
+        self._stream_gates.pop(request_kind, None)
         if request_kind == "ocr":
             self.main_window.update_ocr_result("OCR 识别失败。")
             self._show_error("OCR 识别失败", message)

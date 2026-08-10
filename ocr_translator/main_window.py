@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFontMetrics, QPixmap
+from PyQt6.QtGui import QFontMetrics, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -49,6 +49,8 @@ class MainWindow(QMainWindow):
         self._translation_prompt_template = DEFAULT_TRANSLATION_PROMPT_TEMPLATE
         self._target_language = "简体中文"
         self._ocr_result_text = ""
+        self._ocr_stream_parts: list[str] = []
+        self._is_ocr_streaming = False
         self._preview_source_pixmap = QPixmap()
         self._is_config_drawer_open = False
         self._page_animation: QPropertyAnimation | None = None
@@ -919,16 +921,60 @@ class MainWindow(QMainWindow):
             self.shortcut_kbd_layout.addWidget(KbdBadge(key))
 
     def update_ocr_result(self, text: str) -> None:
+        # 完整渲染入口：占位提示、错误提示与最终结果都走这里。
+        # 流式增量不再走此方法（见 append_ocr_stream_text），因此一次
+        # 请求中全文 Markdown 解析渲染只发生一次（请求结束时）。
+        self._is_ocr_streaming = False
+        self._ocr_stream_parts = []
         self._ocr_result_text = text.strip()
         self.ocr_result_output.setMarkdown(
             render_markdown_preserving_line_breaks(self._ocr_result_text)
         )
 
+    def begin_ocr_stream(self) -> None:
+        """进入 OCR 流式显示模式：清空旧内容，等待纯文本增量追加。"""
+        self._is_ocr_streaming = True
+        self._ocr_stream_parts = []
+        self._ocr_result_text = ""
+        self.ocr_result_output.clear()
+
+    def append_ocr_stream_text(self, delta: str) -> None:
+        """
+        在 OCR 结果文档末尾以纯文本方式追加一段流式增量。
+
+        QTextDocument 的 setMarkdown 没有增量接口，流式期间逐 chunk 全文
+        重排是长输出卡顿的根源；这里改用 QTextCursor 在尾部 insertText，
+        单次代价只与增量长度成正比。滚动条仅在原本就位于底部时跟随，
+        用户上滚阅读时不再被强制复位。请求完成后由 update_ocr_result
+        对最终全文做一次 Markdown 渲染。
+        """
+        if not delta:
+            return
+        if not self._is_ocr_streaming:
+            self.begin_ocr_stream()
+
+        self._ocr_stream_parts.append(delta)
+
+        scroll_bar = self.ocr_result_output.verticalScrollBar()
+        should_follow_tail = scroll_bar.value() >= scroll_bar.maximum() - 4
+
+        cursor = QTextCursor(self.ocr_result_output.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        cursor.insertText(delta)
+
+        if should_follow_tail:
+            scroll_bar.setValue(scroll_bar.maximum())
+
     def clear_ocr_result(self) -> None:
+        self._is_ocr_streaming = False
+        self._ocr_stream_parts = []
         self._ocr_result_text = ""
         self.ocr_result_output.clear()
 
     def get_ocr_result_text(self) -> str:
+        if self._is_ocr_streaming:
+            # 流式进行中：返回已接收增量的拼接结果（例如复制按钮）。
+            return "".join(self._ocr_stream_parts).strip()
         return self._ocr_result_text
 
     def set_config(self, config: AppConfig) -> None:
