@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -11,152 +10,89 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from .config_manager import DEFAULT_MODEL_NAME, DEFAULT_REFRESH_SHORTCUT
-from .theme import apply_window_theme
 from .ui_widgets import (
     Pill,
     SegmentedControl,
     ShortcutCaptureEdit,
     StyledComboBox,
-    refresh_widget_style,
 )
 
 
-class SettingsDialog(QDialog):
-    """Window-scoped settings surface; persistence stays in AppController."""
+class SettingsPages(QObject):
+    """新 UI 的窗口内设置页面（API 服务 / 提示词 / 快捷键 / 关于）。
+
+    设置不再使用独立的模态对话框：这些页面会被主窗口放进同一个内容卡片里，
+    由左侧导航切换。持久化仍然完全交给 AppController，这里只负责界面。
+    """
+
+    #: 任意设置页底部的「保存设置」被点击
+    saveRequested = pyqtSignal()
+    #: API 页或提示词页切换了服务（ocr / translation）
+    roleChanged = pyqtSignal(str)
 
     PAGE_KEYS = ("api", "prompt", "shortcut", "about")
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
-        self.setObjectName("SettingsDialog")
-        self.setWindowTitle("OnT 设置")
-        self.setModal(True)
-        self.setFixedSize(720, 540)
-        self._nav_buttons: dict[str, QPushButton] = {}
-        self._page_indices: dict[str, int] = {}
-        self._setup_ui()
-        apply_window_theme(self)
-        self.show_page("api")
+        self.save_buttons: list[QPushButton] = []
+        self.pages: dict[str, QWidget] = {}
 
-    def _setup_ui(self) -> None:
-        root = QWidget(self)
-        root.setObjectName("SettingsRoot")
+        self.pages["api"] = self._build_api_page()
+        self.pages["prompt"] = self._build_prompt_page()
+        self.pages["shortcut"] = self._build_shortcut_page()
+        self.pages["about"] = self._build_about_page()
 
-        dialog_layout = QHBoxLayout(self)
-        dialog_layout.setContentsMargins(0, 0, 0, 0)
-        dialog_layout.setSpacing(0)
-        dialog_layout.addWidget(root)
+        self.role_segment.selectionChanged.connect(self._on_role_selected)
+        self.prompt_service_segment.selectionChanged.connect(self._on_role_selected)
 
-        root_layout = QHBoxLayout(root)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+    # ------------------------------------------------------------------
+    # 角色（OCR / 翻译）切换
+    # ------------------------------------------------------------------
+    def _on_role_selected(self, role: str) -> None:
+        self.roleChanged.emit(role)
 
-        rail = self._build_navigation_rail()
-        root_layout.addWidget(rail)
+    def set_role(self, role: str) -> None:
+        """同步两处服务切换控件，不触发信号。"""
+        self.role_segment.setCurrentKey(role, emit_signal=False)
+        self.prompt_service_segment.setCurrentKey(role, emit_signal=False)
 
-        content = QWidget()
-        content.setObjectName("ContentViewport")
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(0, 0, 0, 0)
-        content_layout.setSpacing(0)
+    def set_role_locked(self, locked: bool, tooltip: str = "") -> None:
+        """模型拉取期间锁定服务切换，避免结果绑定到错误的服务。"""
+        for segment in (self.role_segment, self.prompt_service_segment):
+            segment.setEnabled(not locked)
+            segment.setToolTip(tooltip)
 
-        self.page_stack = QStackedWidget()
-        self._add_page("api", self._build_api_page())
-        self._add_page("prompt", self._build_prompt_page())
-        self._add_page("shortcut", self._build_shortcut_page())
-        self._add_page("about", self._build_about_page())
-        content_layout.addWidget(self.page_stack, 1)
-
-        footer = QFrame()
-        footer.setObjectName("SettingsFooter")
-        footer.setFixedHeight(60)
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(24, 12, 24, 12)
-        footer_layout.setSpacing(8)
-        footer_layout.addStretch(1)
-
-        self.close_button = QPushButton("关闭")
-        self.close_button.setProperty("variant", "ghost")
-        self.close_button.clicked.connect(self.reject)
-
-        self.save_button = QPushButton("保存设置")
-        self.save_button.setProperty("variant", "blue")
-        self.save_button.setToolTip("验证并保存当前 OCR、翻译和快捷键配置")
-
-        footer_layout.addWidget(self.close_button)
-        footer_layout.addWidget(self.save_button)
-        content_layout.addWidget(footer)
-        root_layout.addWidget(content, 1)
-
-    def _build_navigation_rail(self) -> QFrame:
-        rail = QFrame()
-        rail.setObjectName("SettingsRail")
-        rail.setFixedWidth(200)
-
-        layout = QVBoxLayout(rail)
-        layout.setContentsMargins(16, 20, 16, 16)
-        layout.setSpacing(4)
-
-        eyebrow = QLabel("ONT PREFERENCES")
-        eyebrow.setObjectName("Eyebrow")
-        title = QLabel("设置")
-        title.setObjectName("BrandName")
-        layout.addWidget(eyebrow)
-        layout.addSpacing(3)
-        layout.addWidget(title)
-        layout.addSpacing(20)
-
-        items = (
-            ("api", "API 服务"),
-            ("prompt", "提示词"),
-            ("shortcut", "快捷键"),
-            ("about", "关于"),
-        )
-        for key, text in items:
-            button = QPushButton(text)
-            button.setObjectName("SettingsNavItem")
-            button.setProperty("active", False)
-            button.clicked.connect(
-                lambda _checked=False, selected_key=key: self.show_page(
-                    selected_key
-                )
-            )
-            layout.addWidget(button)
-            self._nav_buttons[key] = button
-
-        layout.addStretch(1)
-        version = QLabel("OnT  v1.0.0")
-        version.setObjectName("Muted")
-        layout.addWidget(version)
-        return rail
-
-    def _add_page(self, key: str, page: QWidget) -> None:
-        self._page_indices[key] = self.page_stack.addWidget(page)
-
+    # ------------------------------------------------------------------
+    # 页面骨架
+    # ------------------------------------------------------------------
     def _page_scaffold(
         self,
         eyebrow_text: str,
         title_text: str,
         description_text: str,
-    ) -> tuple[QScrollArea, QVBoxLayout]:
+        with_save: bool = True,
+    ) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        page.setObjectName("ContentViewport")
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(0)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         viewport = QWidget()
         viewport.setObjectName("SettingsPageViewport")
         scroll.setWidget(viewport)
 
         layout = QVBoxLayout(viewport)
-        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setContentsMargins(26, 24, 26, 20)
         layout.setSpacing(0)
 
         eyebrow = QLabel(eyebrow_text)
@@ -173,7 +109,30 @@ class SettingsDialog(QDialog):
         layout.addSpacing(6)
         layout.addWidget(description)
         layout.addSpacing(18)
-        return scroll, layout
+
+        page_layout.addWidget(scroll, 1)
+
+        if with_save:
+            page_layout.addWidget(self._build_actions_bar())
+
+        return page, layout
+
+    def _build_actions_bar(self) -> QFrame:
+        actions = QFrame()
+        actions.setObjectName("SettingsPageActions")
+        actions_layout = QHBoxLayout(actions)
+        actions_layout.setContentsMargins(26, 12, 26, 16)
+        actions_layout.setSpacing(8)
+        actions_layout.addStretch(1)
+
+        save_button = QPushButton("保存设置")
+        save_button.setProperty("variant", "blue")
+        save_button.setToolTip("验证并保存当前 OCR、翻译和快捷键配置")
+        save_button.clicked.connect(lambda _checked=False: self.saveRequested.emit())
+        actions_layout.addWidget(save_button)
+
+        self.save_buttons.append(save_button)
+        return actions
 
     def _settings_row(
         self,
@@ -211,6 +170,16 @@ class SettingsDialog(QDialog):
         return row
 
     @staticmethod
+    def _inline_group(spacing: int = 8) -> tuple[QWidget, QHBoxLayout]:
+        """设计稿中的 .row-inline：控件与操作按钮同一行。"""
+        group = QWidget()
+        group.setObjectName("FieldGroup")
+        layout = QHBoxLayout(group)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(spacing)
+        return group, layout
+
+    @staticmethod
     def _field_group(spacing: int = 8) -> tuple[QWidget, QVBoxLayout]:
         group = QWidget()
         group.setObjectName("FieldGroup")
@@ -219,6 +188,9 @@ class SettingsDialog(QDialog):
         layout.setSpacing(spacing)
         return group, layout
 
+    # ------------------------------------------------------------------
+    # API 服务
+    # ------------------------------------------------------------------
     def _build_api_page(self) -> QWidget:
         page, layout = self._page_scaffold(
             "CONNECTIONS",
@@ -229,39 +201,29 @@ class SettingsDialog(QDialog):
         self.role_segment = SegmentedControl(
             [("ocr", "OCR 识别"), ("translation", "翻译")]
         )
-        self.role_context_label = QLabel("正在编辑 OCR 识别服务")
-        self.role_context_label.setObjectName("Hint")
-        role_group, role_layout = self._field_group(6)
+        role_holder, role_layout = self._inline_group()
         role_layout.addWidget(self.role_segment)
-        role_layout.addWidget(self.role_context_label)
+        role_layout.addStretch(1)
         layout.addWidget(
             self._settings_row(
                 "配置用途",
                 "切换后显示对应服务的独立配置",
-                role_group,
+                role_holder,
             )
         )
 
-        profile_group, profile_layout = self._field_group(8)
+        profile_group, profile_layout = self._inline_group(8)
         self.api_profile_combo = StyledComboBox()
-        profile_layout.addWidget(self.api_profile_combo)
-
-        profile_actions = QWidget()
-        profile_actions.setObjectName("FieldGroup")
-        profile_actions_layout = QHBoxLayout(profile_actions)
-        profile_actions_layout.setContentsMargins(0, 0, 0, 0)
-        profile_actions_layout.setSpacing(6)
-
         self.add_api_profile_button = QPushButton("新增")
         self.add_api_profile_button.setProperty("variant", "soft")
         self.update_api_profile_button = QPushButton("更新")
         self.update_api_profile_button.setProperty("variant", "soft")
         self.delete_api_profile_button = QPushButton("删除")
         self.delete_api_profile_button.setProperty("variant", "danger")
-        profile_actions_layout.addWidget(self.add_api_profile_button)
-        profile_actions_layout.addWidget(self.update_api_profile_button)
-        profile_actions_layout.addWidget(self.delete_api_profile_button)
-        profile_layout.addWidget(profile_actions)
+        profile_layout.addWidget(self.api_profile_combo, 1)
+        profile_layout.addWidget(self.add_api_profile_button)
+        profile_layout.addWidget(self.update_api_profile_button)
+        profile_layout.addWidget(self.delete_api_profile_button)
         layout.addWidget(
             self._settings_row(
                 "已保存配置",
@@ -280,11 +242,7 @@ class SettingsDialog(QDialog):
             )
         )
 
-        api_key_group = QWidget()
-        api_key_group.setObjectName("FieldGroup")
-        api_key_layout = QHBoxLayout(api_key_group)
-        api_key_layout.setContentsMargins(0, 0, 0, 0)
-        api_key_layout.setSpacing(8)
+        api_key_group, api_key_layout = self._inline_group()
         self.api_key_input = QLineEdit()
         self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_input.setPlaceholderText("输入访问密钥")
@@ -311,7 +269,7 @@ class SettingsDialog(QDialog):
             )
         )
 
-        model_group, model_layout = self._field_group(8)
+        model_group, model_layout = self._inline_group()
         self.model_name_combo = StyledComboBox()
         self.model_name_combo.setEditable(True)
         self.model_name_combo.addItems(
@@ -329,17 +287,9 @@ class SettingsDialog(QDialog):
         self.cancel_fetch_models_button = QPushButton("取消")
         self.cancel_fetch_models_button.setProperty("variant", "ghost")
         self.cancel_fetch_models_button.hide()
-        model_layout.addWidget(self.model_name_combo)
-
-        model_actions = QWidget()
-        model_actions.setObjectName("FieldGroup")
-        model_actions_layout = QHBoxLayout(model_actions)
-        model_actions_layout.setContentsMargins(0, 0, 0, 0)
-        model_actions_layout.setSpacing(6)
-        model_actions_layout.addWidget(self.fetch_models_button)
-        model_actions_layout.addWidget(self.cancel_fetch_models_button)
-        model_actions_layout.addStretch(1)
-        model_layout.addWidget(model_actions)
+        model_layout.addWidget(self.model_name_combo, 1)
+        model_layout.addWidget(self.fetch_models_button)
+        model_layout.addWidget(self.cancel_fetch_models_button)
         layout.addWidget(
             self._settings_row(
                 "模型",
@@ -361,6 +311,9 @@ class SettingsDialog(QDialog):
         layout.addStretch(1)
         return page
 
+    # ------------------------------------------------------------------
+    # 提示词
+    # ------------------------------------------------------------------
     def _build_prompt_page(self) -> QWidget:
         page, layout = self._page_scaffold(
             "PROMPTS",
@@ -368,16 +321,18 @@ class SettingsDialog(QDialog):
             "编辑当前服务使用的提示词；OCR 与翻译内容会分别保存。",
         )
 
-        role_row = QHBoxLayout()
-        role_row.setSpacing(8)
-        role_label = QLabel("当前服务")
-        role_label.setObjectName("RowLabel")
-        self.prompt_role_pill = Pill("OCR 识别", "blue")
-        role_row.addWidget(role_label)
-        role_row.addWidget(self.prompt_role_pill)
-        role_row.addStretch(1)
-        layout.addLayout(role_row)
-        layout.addSpacing(12)
+        service_row = QHBoxLayout()
+        service_row.setSpacing(10)
+        service_label = QLabel("当前服务")
+        service_label.setObjectName("RowLabel")
+        self.prompt_service_segment = SegmentedControl(
+            [("ocr", "OCR 识别"), ("translation", "翻译")]
+        )
+        service_row.addWidget(service_label)
+        service_row.addWidget(self.prompt_service_segment)
+        service_row.addStretch(1)
+        layout.addLayout(service_row)
+        layout.addSpacing(16)
 
         self.prompt_label = QLabel("OCR 提示词")
         self.prompt_label.setObjectName("SectionTitle")
@@ -385,7 +340,7 @@ class SettingsDialog(QDialog):
         layout.addSpacing(8)
 
         self.prompt_input = QPlainTextEdit()
-        self.prompt_input.setMinimumHeight(285)
+        self.prompt_input.setMinimumHeight(220)
         self.prompt_input.setPlaceholderText("输入发送给模型的提示词")
         layout.addWidget(self.prompt_input, 1)
         layout.addSpacing(8)
@@ -395,6 +350,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(prompt_hint)
         return page
 
+    # ------------------------------------------------------------------
+    # 快捷键
+    # ------------------------------------------------------------------
     def _build_shortcut_page(self) -> QWidget:
         page, layout = self._page_scaffold(
             "KEYBOARD",
@@ -438,11 +396,15 @@ class SettingsDialog(QDialog):
         layout.addStretch(1)
         return page
 
+    # ------------------------------------------------------------------
+    # 关于
+    # ------------------------------------------------------------------
     def _build_about_page(self) -> QWidget:
         page, layout = self._page_scaffold(
             "ABOUT",
             "关于",
             "应用信息与当前界面版本。",
+            with_save=False,
         )
 
         panel = QFrame()
@@ -470,11 +432,3 @@ class SettingsDialog(QDialog):
         layout.addWidget(panel)
         layout.addStretch(1)
         return page
-
-    def show_page(self, key: str) -> None:
-        if key not in self._page_indices:
-            return
-        self.page_stack.setCurrentIndex(self._page_indices[key])
-        for item_key, button in self._nav_buttons.items():
-            button.setProperty("active", item_key == key)
-            refresh_widget_style(button)

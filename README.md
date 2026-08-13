@@ -47,7 +47,7 @@ python -m venv .venv
 copy config.example.json config.json
 ```
 
-然后用编辑器或应用内底部「设置」填写真实的 `api_key`、`base_url`、`model_name`。
+然后用编辑器或应用左侧导航的「API 服务」页填写真实的 `api_key`、`base_url`、`model_name`。
 
 启动：
 
@@ -72,13 +72,15 @@ OnT/
 │   ├── api_utils.py        # API URL / 模型列表工具
 │   ├── config_manager.py   # 配置数据与持久化
 │   ├── floating_window.py  # 悬浮翻译窗口
-│   ├── main_window.py      # 主窗口（概览 / 识别结果）
-│   ├── settings_dialog.py  # 设置对话框
+│   ├── main_window.py      # 主窗口（侧边栏导航 + 全部页面）
+│   ├── settings_pages.py   # 窗口内设置页（API 服务 / 提示词 / 快捷键 / 关于）
+│   ├── ui_widgets.py       # 通用控件（导航项、开关、分段控件、标签）
 │   ├── theme.py            # 统一主题与样式
 │   ├── screenshot_tool.py  # 屏幕框选与截图
 │   ├── stream_utils.py     # 流式增量合并与起始门控（纯 Python，无 Qt 依赖）
 │   └── ...
 ├── assets/                 # 图标等静态资源
+├── design/                 # 新前端 UI 设计稿（React 原型，仅作界面基准）
 ├── tests/                  # 单元测试
 ├── config.example.json     # 配置示例（可提交到仓库）
 ├── config.json             # 本地配置（含密钥，已被 .gitignore 忽略）
@@ -90,7 +92,7 @@ OnT/
 
 1. 按上文完成安装，并准备好 `config.json`（可从 `config.example.json` 复制）。
 2. 启动应用。
-3. 点击主窗口底部的「设置」。
+3. 在左侧导航中点击「API 服务」。
 4. 在「API 服务」中选择 OCR 识别，填写：
    - API Key
    - API Base URL
@@ -164,16 +166,16 @@ OnT/
 
 ### 主窗口
 
-- 左侧导航：**概览** / **识别结果**。
-- 底部 **设置**：打开独立设置对话框（API 服务 / 提示词 / 快捷键 / 关于）。
+- 左侧导航：**概览** / **识别结果** / **API 服务** / **提示词** / **快捷键** / **关于**，所有页面都在主窗口内切换，不再弹出独立设置窗口。
+- 侧边栏右上角的圆形按钮可 **收起 / 展开侧边栏**；收起后仅显示图标，悬停可看到页面名称。
 - **开始框选**：在概览页开始屏幕区域截图。
 - **剪贴板自动处理**：开启或关闭剪贴板图片监听。
 - **OCR / 翻译 / 悬浮字幕** 开关：分别控制服务启用与悬浮窗显示。
 - **复制结果**：在识别结果页复制当前 OCR 输出到剪贴板。
 
-### 设置对话框
+### 设置页
 
-- **保存设置**：保存 API、Prompt、快捷键和悬浮展示区样式。
+- **保存设置**：每个设置页底部都有保存按钮，保存 API、Prompt、快捷键和悬浮展示区样式。
 - **拉取模型**：从当前配置的 API 服务拉取可用模型。
 - **新增 / 更新 / 删除**：管理当前 OCR 或翻译角色下的 API Profile。
 

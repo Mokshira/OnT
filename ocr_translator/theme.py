@@ -31,6 +31,17 @@ SEG_BG = "rgba(0, 0, 0, 10)"
 TOGGLE_OFF = "rgba(0, 0, 0, 46)"
 TOAST_BG = "#18181b"
 
+# 新 UI 的尺寸令牌（与设计稿 index.css 中的数值一致）。
+RADIUS_CARD = 14
+RADIUS_PANEL = 12
+RADIUS_CONTROL = 8
+RADIUS_SM = 6
+SIDEBAR_WIDTH = 188
+SIDEBAR_COLLAPSED_WIDTH = 52
+SIDEBAR_TOGGLE_SIZE = 26
+CONTENT_MARGIN = 14
+TOAST_BOTTOM_OFFSET = 28
+
 FONT_FAMILIES = [
     "Segoe UI Variable Display",
     "Segoe UI",
@@ -42,8 +53,7 @@ MONO_FONT_FAMILIES = ["Cascadia Code", "Consolas", "Microsoft YaHei"]
 def build_stylesheet() -> str:
     """Return the light, window-scoped stylesheet used by OnT's main UI."""
     return f"""
-    QMainWindow#MainWindow,
-    QDialog#SettingsDialog {{
+    QMainWindow#MainWindow {{
         background: {WINDOW_BG};
         color: {INK};
     }}
@@ -52,6 +62,7 @@ def build_stylesheet() -> str:
     QWidget#SettingsRoot,
     QWidget#ContentViewport,
     QWidget#SettingsPageViewport,
+    QWidget#SidebarNav,
     QWidget#FieldGroup {{
         background: transparent;
         color: {INK};
@@ -61,6 +72,11 @@ def build_stylesheet() -> str:
         background: transparent;
         color: {INK_2};
         font-size: 13px;
+    }}
+    QLabel#AppBrand {{
+        color: {INK};
+        font-size: 26px;
+        font-weight: 700;
     }}
     QLabel#BrandName {{
         color: {INK};
@@ -119,17 +135,17 @@ def build_stylesheet() -> str:
     QFrame#ContentCard {{
         background: {SURFACE};
         border: 1px solid {LINE};
-        border-radius: 14px;
+        border-radius: {RADIUS_CARD}px;
     }}
-    QFrame#BottomBar {{
-        background: {SURFACE};
+    QFrame#SettingsPageActions {{
+        background: transparent;
         border: none;
-        border-top: 1px solid {LINE};
+        border-top: 1px solid {LINE_SOFT};
     }}
     QFrame#HintCard {{
         background: {BLUE_SOFT};
         border: 1px solid {BLUE_RING};
-        border-radius: 12px;
+        border-radius: {RADIUS_PANEL}px;
     }}
     QFrame#StatusCard,
     QFrame#PreviewCard,
@@ -137,7 +153,7 @@ def build_stylesheet() -> str:
     QFrame#AboutPanel {{
         background: {SURFACE};
         border: 1px solid {LINE};
-        border-radius: 12px;
+        border-radius: {RADIUS_PANEL}px;
     }}
     QFrame#SettingsRow {{
         background: transparent;
@@ -161,7 +177,7 @@ def build_stylesheet() -> str:
         min-height: 18px;
         padding: 7px 14px;
         border: 1px solid transparent;
-        border-radius: 8px;
+        border-radius: {RADIUS_CONTROL}px;
         background: transparent;
         color: {INK_2};
         font-size: 12px;
@@ -225,7 +241,7 @@ def build_stylesheet() -> str:
         min-height: 20px;
         padding: 6px 10px;
         border: 1px solid transparent;
-        border-radius: 8px;
+        border-radius: {RADIUS_CONTROL}px;
         color: {INK_2};
         font-size: 13px;
         font-weight: 500;
@@ -241,16 +257,25 @@ def build_stylesheet() -> str:
         color: {BLUE};
         font-weight: 600;
     }}
-    QPushButton#BottomSettingsButton {{
-        min-width: 30px;
-        max-width: 30px;
-        min-height: 24px;
-        max-height: 24px;
-        padding: 0;
-        border: none;
-        border-radius: 5px;
+    QPushButton#SidebarItem[collapsed="true"] {{
+        padding: 0px;
+        text-align: center;
+    }}
+    QPushButton#SidebarToggle {{
+        min-width: {SIDEBAR_TOGGLE_SIZE}px;
+        max-width: {SIDEBAR_TOGGLE_SIZE}px;
+        min-height: {SIDEBAR_TOGGLE_SIZE}px;
+        max-height: {SIDEBAR_TOGGLE_SIZE}px;
+        padding: 0px;
+        background: {SURFACE};
+        border: 1px solid {LINE_STRONG};
+        border-radius: {SIDEBAR_TOGGLE_SIZE // 2}px;
         color: {INK_3};
-        font-size: 15px;
+    }}
+    QPushButton#SidebarToggle:hover {{
+        background: {BLUE_SOFT};
+        border-color: {BLUE};
+        color: {BLUE};
     }}
 
     QLineEdit,
@@ -260,7 +285,7 @@ def build_stylesheet() -> str:
     QKeySequenceEdit {{
         background: {SURFACE};
         border: 1px solid {LINE};
-        border-radius: 8px;
+        border-radius: {RADIUS_CONTROL}px;
         padding: 7px 10px;
         color: {INK};
         selection-background-color: {BLUE_SOFT};
@@ -304,7 +329,7 @@ def build_stylesheet() -> str:
     QComboBox QAbstractItemView {{
         background: {SURFACE};
         border: 1px solid {LINE};
-        border-radius: 8px;
+        border-radius: {RADIUS_CONTROL}px;
         color: {INK};
         selection-background-color: {BLUE_SOFT};
         selection-color: {BLUE};
@@ -315,13 +340,13 @@ def build_stylesheet() -> str:
     QWidget#SegmentedControl {{
         background: {SEG_BG};
         border: none;
-        border-radius: 8px;
+        border-radius: {RADIUS_CONTROL}px;
     }}
     QPushButton#SegmentButton {{
         min-height: 20px;
         padding: 3px 12px;
         border: 1px solid transparent;
-        border-radius: 6px;
+        border-radius: {RADIUS_SM}px;
         color: {INK_3};
         background: transparent;
         font-size: 12px;
@@ -369,7 +394,7 @@ def build_stylesheet() -> str:
         background: {SURFACE};
         color: {INK_2};
         border: 1px solid {LINE_STRONG};
-        border-radius: 6px;
+        border-radius: {RADIUS_SM}px;
         font-family: "Cascadia Code", "Consolas", monospace;
         font-size: 11px;
         font-weight: 600;
@@ -394,17 +419,6 @@ def build_stylesheet() -> str:
         border-radius: 16px;
         font-size: 12px;
         font-weight: 600;
-    }}
-
-    QFrame#SettingsRail {{
-        background: {SIDEBAR_BG};
-        border: none;
-        border-right: 1px solid {LINE};
-    }}
-    QFrame#SettingsFooter {{
-        background: {SURFACE};
-        border: none;
-        border-top: 1px solid {LINE};
     }}
 
     QScrollBar:vertical {{
@@ -456,4 +470,3 @@ def apply_window_theme(widget: QWidget) -> None:
     font.setPointSize(10)
     widget.setFont(font)
     widget.setStyleSheet(build_stylesheet())
-

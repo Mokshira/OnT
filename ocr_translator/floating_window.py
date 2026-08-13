@@ -105,21 +105,21 @@ class FloatingSubtitleWindow(QWidget):
         self.menu_frame.setStyleSheet(
             """
             QFrame#FloatingMenu {
-                background: rgba(15, 23, 42, 205);
-                border: 1px solid rgba(255, 255, 255, 95);
+                background: rgba(15, 23, 42, 204);
+                border: 1px solid rgba(255, 255, 255, 94);
                 border-radius: 10px;
             }
             QFrame#FloatingMenu QPushButton {
                 color: white;
-                background: rgba(37, 99, 235, 175);
+                background: rgba(37, 99, 235, 176);
                 border: none;
-                border-radius: 7px;
+                border-radius: 8px;
                 padding: 5px 8px;
                 font-size: 12px;
-                font-weight: 700;
+                font-weight: 600;
             }
             QFrame#FloatingMenu QPushButton:hover {
-                background: rgba(59, 130, 246, 235);
+                background: rgba(37, 99, 235, 217);
             }
             QFrame#FloatingMenu QLabel {
                 color: rgba(255, 255, 255, 215);
@@ -158,7 +158,7 @@ class FloatingSubtitleWindow(QWidget):
             QMenu {
                 background: rgba(15, 23, 42, 235);
                 color: white;
-                border: 1px solid rgba(255, 255, 255, 95);
+                border: 1px solid rgba(255, 255, 255, 94);
                 border-radius: 10px;
                 padding: 6px;
             }
@@ -168,7 +168,7 @@ class FloatingSubtitleWindow(QWidget):
                 margin: 2px 6px;
             }
             QMenu::item:selected {
-                background: rgba(59, 130, 246, 220);
+                background: rgba(37, 99, 235, 217);
             }
             """
 
@@ -241,14 +241,22 @@ class FloatingSubtitleWindow(QWidget):
             QSizePolicy.Policy.Fixed,
         )
 
+        # 新 UI 设计稿中的悬浮菜单按钮为 80x26；实际尺寸取与 sizeHint 的较大值，
+        # 避免中文标题在高 DPI 下被裁切。
+        minimum_button_width = 80
+        minimum_button_height = 26
         standard_button_size = self.lock_button.sizeHint()
         standard_button_width = max(
+            minimum_button_width,
             standard_button_size.width(),
             self.font_button.sizeHint().width(),
             self.background_button.sizeHint().width(),
             self.display_toggle_button.sizeHint().width(),
         )
-        standard_button_height = standard_button_size.height()
+        standard_button_height = max(
+            minimum_button_height,
+            standard_button_size.height(),
+        )
 
         for button in (
             self.font_button,

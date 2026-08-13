@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    pyqtSignal,
+)
 from PyQt6.QtGui import QFontMetrics, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QFrame,
@@ -27,13 +34,38 @@ from .config_manager import (
     DEFAULT_TRANSLATION_PROMPT_TEMPLATE,
 )
 from .floating_window import render_markdown_preserving_line_breaks
-from .settings_dialog import SettingsDialog
-from .theme import apply_window_theme
-from .ui_widgets import KbdBadge, Pill, ToggleSwitch, refresh_widget_style
+from .settings_pages import SettingsPages
+from .theme import (
+    CONTENT_MARGIN,
+    SIDEBAR_COLLAPSED_WIDTH,
+    SIDEBAR_TOGGLE_SIZE,
+    SIDEBAR_WIDTH,
+    TOAST_BOTTOM_OFFSET,
+    apply_window_theme,
+)
+from .ui_widgets import (
+    KbdBadge,
+    Pill,
+    SidebarNavButton,
+    SidebarToggleButton,
+    ToggleSwitch,
+    refresh_widget_style,
+)
 
 
 class MainWindow(QMainWindow):
     closing = pyqtSignal(object)
+
+    #: 左侧导航（新 UI）：设置不再是弹窗，而是与概览/结果平级的页面。
+    NAV_ITEMS = (
+        ("overview", "概览"),
+        ("results", "识别结果"),
+        ("api", "API 服务"),
+        ("prompt", "提示词"),
+        ("shortcut", "快捷键"),
+        ("about", "关于"),
+    )
+    SETTINGS_PAGE_KEYS = ("api", "prompt", "shortcut", "about")
 
     def __init__(self) -> None:
         super().__init__()
@@ -53,6 +85,10 @@ class MainWindow(QMainWindow):
         self._is_ocr_streaming = False
         self._preview_source_pixmap = QPixmap()
         self._is_config_drawer_open = False
+        self._current_page_key = ""
+        self._is_sidebar_collapsed = False
+        self._nav_buttons: dict[str, SidebarNavButton] = {}
+        self._page_indices: dict[str, int] = {}
         self._page_animation: QPropertyAnimation | None = None
         self._page_effects: dict[int, QGraphicsOpacityEffect] = {}
 
@@ -63,8 +99,7 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         apply_window_theme(self)
         self.switch_config_role("ocr", save_current=False)
-        self.set_config_drawer_visible(False)
-        self._set_page(0, animate=False)
+        self.show_page("overview", animate=False)
 
     def _setup_window(self) -> None:
         self.setObjectName("MainWindow")
@@ -77,70 +112,144 @@ class MainWindow(QMainWindow):
         central.setObjectName("AppRoot")
         self.setCentralWidget(central)
 
-        root_layout = QVBoxLayout(central)
+        root_layout = QHBoxLayout(central)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
 
-        body = QWidget()
-        body.setObjectName("ContentViewport")
-        body_layout = QHBoxLayout(body)
-        body_layout.setContentsMargins(0, 0, 0, 0)
-        body_layout.setSpacing(0)
-
-        body_layout.addWidget(self._build_sidebar())
+        self.sidebar = self._build_sidebar()
+        root_layout.addWidget(self.sidebar)
 
         content_area = QFrame()
         content_area.setObjectName("ContentArea")
         content_layout = QVBoxLayout(content_area)
-        content_layout.setContentsMargins(14, 14, 14, 14)
+        content_layout.setContentsMargins(
+            CONTENT_MARGIN,
+            CONTENT_MARGIN,
+            CONTENT_MARGIN,
+            CONTENT_MARGIN,
+        )
         content_layout.setSpacing(0)
+
+        content_card = QFrame()
+        content_card.setObjectName("ContentCard")
+        card_layout = QVBoxLayout(content_card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        card_layout.setSpacing(0)
+
+        self.settings_pages = SettingsPages(self)
 
         self.page_stack = QStackedWidget()
         self.overview_page = self._build_overview_page()
         self.results_page = self._build_results_page()
-        self.page_stack.addWidget(self.overview_page)
-        self.page_stack.addWidget(self.results_page)
-        content_layout.addWidget(self.page_stack)
-        body_layout.addWidget(content_area, 1)
+        self._register_page("overview", self.overview_page)
+        self._register_page("results", self.results_page)
+        for key in self.SETTINGS_PAGE_KEYS:
+            self._register_page(key, self.settings_pages.pages[key])
 
-        root_layout.addWidget(body, 1)
-        root_layout.addWidget(self._build_bottom_bar())
+        card_layout.addWidget(self.page_stack)
+        content_layout.addWidget(content_card)
+        root_layout.addWidget(content_area, 1)
 
-        self.settings_dialog = SettingsDialog(self)
+        # 收起按钮悬在侧边栏右侧边界上，因此不进入布局，而是手动定位。
+        self.sidebar_toggle_button = SidebarToggleButton(central)
+        self._sidebar_animation = QVariantAnimation(self)
+        self._sidebar_animation.setDuration(180)
+        self._sidebar_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._sidebar_animation.valueChanged.connect(self._on_sidebar_width_changed)
+        self._update_sidebar_toggle_position()
+
         self._bind_settings_controls()
         self._connect_ui_signals()
         self._setup_toast()
 
+    # ------------------------------------------------------------------
+    # 侧边栏
+    # ------------------------------------------------------------------
     def _build_sidebar(self) -> QFrame:
         sidebar = QFrame()
         sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(188)
+        sidebar.setProperty("collapsed", False)
+        sidebar.setFixedWidth(SIDEBAR_WIDTH)
 
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(16, 18, 16, 16)
-        layout.setSpacing(4)
+        layout.setSpacing(0)
+        self._sidebar_layout = layout
 
-        brand = QLabel("OnT")
-        brand.setObjectName("BrandName")
-        eyebrow = QLabel("OCR TRANSLATOR")
-        eyebrow.setObjectName("Eyebrow")
-        layout.addWidget(brand)
-        layout.addSpacing(2)
-        layout.addWidget(eyebrow)
-        layout.addSpacing(22)
+        self.brand_label = QLabel("OnT")
+        self.brand_label.setObjectName("AppBrand")
+        self.brand_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.brand_label)
+        layout.addSpacing(20)
 
-        self.overview_nav_button = QPushButton("概览")
-        self.overview_nav_button.setObjectName("SidebarItem")
-        self.overview_nav_button.setProperty("active", True)
+        nav_container = QWidget()
+        nav_container.setObjectName("SidebarNav")
+        nav_layout = QVBoxLayout(nav_container)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(4)
+        self._nav_layout = nav_layout
 
-        self.results_nav_button = QPushButton("识别结果")
-        self.results_nav_button.setObjectName("SidebarItem")
-        self.results_nav_button.setProperty("active", False)
+        for key, text in self.NAV_ITEMS:
+            button = SidebarNavButton(key, text)
+            nav_layout.addWidget(button)
+            self._nav_buttons[key] = button
 
-        layout.addWidget(self.overview_nav_button)
-        layout.addWidget(self.results_nav_button)
+        layout.addWidget(nav_container)
         layout.addStretch(1)
         return sidebar
+
+    def _update_sidebar_toggle_position(self, sidebar_width: int | None = None) -> None:
+        if not hasattr(self, "sidebar_toggle_button"):
+            return
+        width = self.sidebar.width() if sidebar_width is None else int(sidebar_width)
+        self.sidebar_toggle_button.move(
+            max(0, width - (SIDEBAR_TOGGLE_SIZE // 2)),
+            18,
+        )
+        self.sidebar_toggle_button.raise_()
+
+    def _on_sidebar_width_changed(self, value) -> None:
+        width = int(value)
+        self.sidebar.setFixedWidth(width)
+        self._update_sidebar_toggle_position(width)
+
+    def is_sidebar_collapsed(self) -> bool:
+        return self._is_sidebar_collapsed
+
+    def toggle_sidebar(self) -> None:
+        self.set_sidebar_collapsed(not self._is_sidebar_collapsed)
+
+    def set_sidebar_collapsed(self, collapsed: bool, animate: bool = True) -> None:
+        collapsed = bool(collapsed)
+        self._is_sidebar_collapsed = collapsed
+
+        self.sidebar.setProperty("collapsed", collapsed)
+        refresh_widget_style(self.sidebar)
+        self.brand_label.setVisible(not collapsed)
+        self._sidebar_layout.setContentsMargins(
+            *((8, 18, 8, 16) if collapsed else (16, 18, 16, 16))
+        )
+        # 收起后顶部留出收起按钮的位置。
+        self._nav_layout.setContentsMargins(0, 34 if collapsed else 0, 0, 0)
+        for button in self._nav_buttons.values():
+            button.setCollapsed(collapsed)
+        self.sidebar_toggle_button.setCollapsed(collapsed)
+
+        target_width = SIDEBAR_COLLAPSED_WIDTH if collapsed else SIDEBAR_WIDTH
+        self._sidebar_animation.stop()
+        if animate and self.isVisible():
+            self._sidebar_animation.setStartValue(self.sidebar.width())
+            self._sidebar_animation.setEndValue(target_width)
+            self._sidebar_animation.start()
+        else:
+            self.sidebar.setFixedWidth(target_width)
+            self._update_sidebar_toggle_position(target_width)
+
+    # ------------------------------------------------------------------
+    # 内容页
+    # ------------------------------------------------------------------
+    def _register_page(self, key: str, page: QWidget) -> None:
+        self._page_indices[key] = self.page_stack.addWidget(page)
 
     def _new_content_page(self) -> tuple[QWidget, QVBoxLayout]:
         page = QWidget()
@@ -148,12 +257,6 @@ class MainWindow(QMainWindow):
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(0)
-
-        card = QFrame()
-        card.setObjectName("ContentCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(0, 0, 0, 0)
-        card_layout.setSpacing(0)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -165,8 +268,7 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(0)
         scroll.setWidget(viewport)
 
-        card_layout.addWidget(scroll)
-        page_layout.addWidget(card)
+        page_layout.addWidget(scroll)
         return page, content_layout
 
     def _page_header(
@@ -412,66 +514,45 @@ class MainWindow(QMainWindow):
         layout.addLayout(result_row, 1)
         return page
 
-    def _build_bottom_bar(self) -> QFrame:
-        bar = QFrame()
-        bar.setObjectName("BottomBar")
-        bar.setFixedHeight(44)
-        layout = QHBoxLayout(bar)
-        layout.setContentsMargins(16, 0, 16, 0)
-        layout.setSpacing(8)
-
-        version = QLabel("v1.0.0")
-        version.setObjectName("Muted")
-        layout.addWidget(version)
-        layout.addStretch(1)
-
-        self.settings_button = QPushButton("⚙")
-        self.settings_button.setObjectName("BottomSettingsButton")
-        self.settings_button.setToolTip("打开设置")
-        self.settings_button.setAccessibleName("设置")
-        layout.addWidget(self.settings_button)
-        return bar
-
     def _bind_settings_controls(self) -> None:
-        dialog = self.settings_dialog
-        self.api_profile_combo = dialog.api_profile_combo
-        self.add_api_profile_button = dialog.add_api_profile_button
-        self.update_api_profile_button = dialog.update_api_profile_button
-        self.delete_api_profile_button = dialog.delete_api_profile_button
-        self.api_profile_name_input = dialog.api_profile_name_input
-        self.api_key_input = dialog.api_key_input
-        self.toggle_api_key_button = dialog.toggle_api_key_button
-        self.base_url_input = dialog.base_url_input
-        self.model_name_combo = dialog.model_name_combo
-        self.fetch_models_button = dialog.fetch_models_button
-        self.cancel_fetch_models_button = dialog.cancel_fetch_models_button
-        self.target_language_input = dialog.target_language_input
-        self.prompt_input = dialog.prompt_input
-        self.prompt_label = dialog.prompt_label
-        self.refresh_shortcut_input = dialog.refresh_shortcut_input
-        self.refresh_shortcut_hint_label = dialog.refresh_shortcut_hint_label
-        self.save_button = dialog.save_button
+        pages = self.settings_pages
+        self.api_profile_combo = pages.api_profile_combo
+        self.add_api_profile_button = pages.add_api_profile_button
+        self.update_api_profile_button = pages.update_api_profile_button
+        self.delete_api_profile_button = pages.delete_api_profile_button
+        self.api_profile_name_input = pages.api_profile_name_input
+        self.api_key_input = pages.api_key_input
+        self.toggle_api_key_button = pages.toggle_api_key_button
+        self.base_url_input = pages.base_url_input
+        self.model_name_combo = pages.model_name_combo
+        self.fetch_models_button = pages.fetch_models_button
+        self.cancel_fetch_models_button = pages.cancel_fetch_models_button
+        self.target_language_input = pages.target_language_input
+        self.target_language_row = pages.target_language_row
+        self.prompt_input = pages.prompt_input
+        self.prompt_label = pages.prompt_label
+        self.refresh_shortcut_input = pages.refresh_shortcut_input
+        self.refresh_shortcut_hint_label = pages.refresh_shortcut_hint_label
 
-        self.ocr_mode_button = dialog.role_segment.button("ocr")
-        self.translation_mode_button = dialog.role_segment.button("translation")
-        self.config_drawer_panel = dialog
-        self.drawer_toggle_button = self.settings_button
+        # 每个设置页底部都有一个「保存设置」按钮；这个不可见的代理按钮把它们
+        # 汇聚成 AppController 一直使用的单一 save_button 入口。
+        self.save_button = QPushButton("保存设置", self)
+        self.save_button.hide()
+        pages.saveRequested.connect(self.save_button.click)
+
+        self.ocr_mode_button = pages.role_segment.button("ocr")
+        self.translation_mode_button = pages.role_segment.button("translation")
         self.preview_panel = self.results_page
 
     def _connect_ui_signals(self) -> None:
-        self.overview_nav_button.clicked.connect(
-            lambda _checked=False: self._set_page(0)
+        for key, button in self._nav_buttons.items():
+            button.clicked.connect(
+                lambda _checked=False, page_key=key: self.show_page(page_key)
+            )
+        self.sidebar_toggle_button.clicked.connect(
+            lambda _checked=False: self.toggle_sidebar()
         )
-        self.results_nav_button.clicked.connect(
-            lambda _checked=False: self._set_page(1)
-        )
-        self.settings_button.clicked.connect(
-            lambda _checked=False: self.set_config_drawer_visible(True)
-        )
-        self.settings_dialog.finished.connect(self._on_settings_dialog_finished)
-        self.settings_dialog.role_segment.selectionChanged.connect(
-            self.switch_config_role
-        )
+        self.settings_pages.roleChanged.connect(self.switch_config_role)
         self.api_profile_combo.currentIndexChanged.connect(
             self.on_api_profile_selection_changed
         )
@@ -517,15 +598,30 @@ class MainWindow(QMainWindow):
         self._toast_fade_out.finished.connect(self._toast_label.hide)
         self._toast_hide_timer.timeout.connect(self._hide_toast)
 
-    def _set_page(self, index: int, animate: bool = True) -> None:
-        if index < 0 or index >= self.page_stack.count():
+    # ------------------------------------------------------------------
+    # 导航
+    # ------------------------------------------------------------------
+    def current_page_key(self) -> str:
+        return self._current_page_key
+
+    def show_page(self, key: str, animate: bool = True) -> None:
+        if key not in self._page_indices:
             return
 
+        previous_key = self._current_page_key
+        if previous_key != key and previous_key in self.SETTINGS_PAGE_KEYS:
+            # 离开设置页时回写输入内容，与旧版关闭设置对话框的行为一致。
+            self._sync_active_role_state()
+            self._refresh_overview_status()
+            self._refresh_shortcut_badges()
+
+        self._current_page_key = key
+        self._is_config_drawer_open = key in self.SETTINGS_PAGE_KEYS
+
+        index = self._page_indices[key]
         self.page_stack.setCurrentIndex(index)
-        self.overview_nav_button.setProperty("active", index == 0)
-        self.results_nav_button.setProperty("active", index == 1)
-        refresh_widget_style(self.overview_nav_button)
-        refresh_widget_style(self.results_nav_button)
+        for item_key, button in self._nav_buttons.items():
+            button.setActive(item_key == key)
 
         if not animate or not self.isVisible():
             return
@@ -558,8 +654,7 @@ class MainWindow(QMainWindow):
         self.model_name_combo.setEnabled(not is_fetching)
 
         lock_tooltip = "模型拉取进行中，完成或取消后才能切换" if is_fetching else ""
-        self.settings_dialog.role_segment.setEnabled(not is_fetching)
-        self.settings_dialog.role_segment.setToolTip(lock_tooltip)
+        self.settings_pages.set_role_locked(is_fetching, lock_tooltip)
         self.api_profile_combo.setEnabled(not is_fetching)
         self.api_profile_combo.setToolTip(lock_tooltip)
         self.add_api_profile_button.setEnabled(not is_fetching)
@@ -573,23 +668,13 @@ class MainWindow(QMainWindow):
         self.cancel_fetch_models_button.setText("取消中…")
 
     def set_config_drawer_visible(self, is_visible: bool) -> None:
-        self._is_config_drawer_open = bool(is_visible)
-        if self._is_config_drawer_open:
-            self.settings_dialog.show_page("api")
-            self.settings_dialog.open()
-            self.settings_dialog.raise_()
-            self.settings_dialog.activateWindow()
-            self.settings_button.setToolTip("设置窗口已打开")
+        """兼容旧接口：设置已内嵌到主窗口，这里改为导航到设置页。"""
+        if is_visible:
+            self.show_page("api")
+        elif self._current_page_key in self.SETTINGS_PAGE_KEYS:
+            self.show_page("overview")
         else:
-            self.settings_dialog.hide()
-            self.settings_button.setToolTip("打开设置")
-
-    def _on_settings_dialog_finished(self, _result: int) -> None:
-        self._is_config_drawer_open = False
-        self.settings_button.setToolTip("打开设置")
-        self._sync_active_role_state()
-        self._refresh_overview_status()
-        self._refresh_shortcut_badges()
+            self._is_config_drawer_open = False
 
     def _open_config_drawer_for_role(self, role: str) -> None:
         self.switch_config_role(role)
@@ -748,28 +833,22 @@ class MainWindow(QMainWindow):
             self._sync_active_role_state()
 
         self._active_config_role = role
-        self.settings_dialog.role_segment.setCurrentKey(role, emit_signal=False)
+        self.settings_pages.set_role(role)
 
         if role == "ocr":
-            self.settings_dialog.role_context_label.setText(
-                "正在编辑 OCR 识别服务"
-            )
-            self.settings_dialog.prompt_role_pill.setText("OCR 识别")
             self.prompt_label.setText("OCR 提示词")
             self.prompt_input.setPlainText(
                 self._ocr_prompt_template or DEFAULT_OCR_PROMPT_TEMPLATE
             )
-            self.settings_dialog.target_language_row.hide()
+            self.target_language_row.hide()
             self.fetch_models_button.setToolTip("拉取 OCR 模型列表")
         else:
-            self.settings_dialog.role_context_label.setText("正在编辑翻译服务")
-            self.settings_dialog.prompt_role_pill.setText("翻译")
             self.prompt_label.setText("翻译提示词")
             self.prompt_input.setPlainText(
                 self._translation_prompt_template
                 or DEFAULT_TRANSLATION_PROMPT_TEMPLATE
             )
-            self.settings_dialog.target_language_row.show()
+            self.target_language_row.show()
             self.target_language_input.setText(self._target_language)
             self.fetch_models_button.setToolTip("拉取翻译模型列表")
 
@@ -1074,7 +1153,10 @@ class MainWindow(QMainWindow):
         self._toast_label.adjustSize()
 
         x = max(22, (self.width() - self._toast_label.width()) // 2)
-        y = max(22, self.height() - self._toast_label.height() - 58)
+        y = max(
+            22,
+            self.height() - self._toast_label.height() - TOAST_BOTTOM_OFFSET,
+        )
         self._toast_label.move(x, y)
 
     def _hide_toast(self) -> None:
@@ -1109,7 +1191,12 @@ class MainWindow(QMainWindow):
             self._render_preview()
         if hasattr(self, "_toast_label") and self._toast_label.isVisible():
             self._update_toast_position()
+        self._update_sidebar_toggle_position()
         super().resizeEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._update_sidebar_toggle_position()
 
     def closeEvent(self, event) -> None:
         self.closing.emit(event)
