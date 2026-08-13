@@ -4,31 +4,77 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QPointF,
     QPropertyAnimation,
+    QRect,
     QRectF,
     QSize,
     Qt,
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PyQt6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QIcon,
+    QPainter,
+    QPainterPath,
+    QPen,
+    QPixmap,
+    QTextBlockFormat,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import (
     QAbstractButton,
     QComboBox,
     QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QWidget,
 )
 
-from .theme import BLUE, INK_2, INK_3, SIDEBAR_TOGGLE_SIZE
+from .theme import (
+    BLUE,
+    BLUE_SOFT,
+    COMBO_HEIGHT,
+    INK_2,
+    INK_3,
+    NAV_ITEM_HEIGHT,
+    RADIUS_CONTROL,
+    SIDEBAR_TOGGLE_SIZE,
+)
 
 
 def refresh_widget_style(widget: QWidget) -> None:
     widget.style().unpolish(widget)
     widget.style().polish(widget)
     widget.update()
+
+
+def apply_line_height(text_widget, percent: int = 170) -> None:
+    """给文本控件的全文设置行高。
+
+    设计稿里正文行高是 1.6~1.7，但 Qt Style Sheet 并不支持 line-height，
+    只能通过 QTextBlockFormat 在文档层面设置。注意：setMarkdown /
+    setPlainText 会重建文档，因此每次整体赋值后都需要重新调用。
+    """
+    try:
+        document = text_widget.document()
+        cursor = QTextCursor(document)
+        cursor.beginEditBlock()
+        cursor.select(QTextCursor.SelectionType.Document)
+        block_format = QTextBlockFormat()
+        block_format.setLineHeight(
+            float(percent),
+            QTextBlockFormat.LineHeightTypes.ProportionalHeight.value,
+        )
+        cursor.mergeBlockFormat(block_format)
+        cursor.endEditBlock()
+    except Exception:
+        # 行高纯属视觉细节，不应因为 Qt 版本差异而影响功能。
+        pass
 
 
 class ShortcutCaptureEdit(QKeySequenceEdit):
@@ -48,21 +94,55 @@ class ShortcutCaptureEdit(QKeySequenceEdit):
         super().focusOutEvent(event)
 
 
+class PromptTextEdit(QPlainTextEdit):
+    """提示词编辑框：整体赋值后自动恢复设计稿的 1.6 行高。"""
+
+    LINE_HEIGHT_PERCENT = 160
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        apply_line_height(self, self.LINE_HEIGHT_PERCENT)
+
+    def setPlainText(self, text: str) -> None:
+        super().setPlainText(text)
+        apply_line_height(self, self.LINE_HEIGHT_PERCENT)
+
+
 class StyledComboBox(QComboBox):
+    """下拉框：自绘 9x6 的 chevron，与设计稿 .combo .chevron 对齐。"""
+
+    CHEVRON_WIDTH = 9.0
+    CHEVRON_HEIGHT = 6.0
+    CHEVRON_RIGHT_MARGIN = 12.0
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(COMBO_HEIGHT)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
 
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        arrow_color = QColor(BLUE) if self.hasFocus() else QColor(INK_3)
-        painter.setPen(QPen(arrow_color, 1.5))
+        is_open = self.view().isVisible() if self.view() is not None else False
+        arrow_color = QColor(BLUE) if (self.hasFocus() or is_open) else QColor(INK_3)
+        pen = QPen(arrow_color, 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
-        center_x = self.width() - 18
-        center_y = self.height() // 2 + 1
+        right = self.width() - self.CHEVRON_RIGHT_MARGIN
+        left = right - self.CHEVRON_WIDTH
+        top = (self.height() - self.CHEVRON_HEIGHT) / 2.0
 
-        painter.drawLine(center_x - 4, center_y - 2, center_x, center_y + 2)
-        painter.drawLine(center_x, center_y + 2, center_x + 4, center_y - 2)
+        path = QPainterPath()
+        path.moveTo(left, top)
+        path.lineTo(left + (self.CHEVRON_WIDTH / 2.0), top + self.CHEVRON_HEIGHT)
+        path.lineTo(right, top)
+        painter.drawPath(path)
 
 
 class ToggleSwitch(QAbstractButton):
@@ -75,6 +155,9 @@ class ToggleSwitch(QAbstractButton):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setFixedSize(32, 18)
         self._offset = 0.0
+        # 设计稿里开关没有焦点环；鼠标点击后也保留焦点环会很脏，
+        # 因此只在键盘（Tab）获焦时才画。
+        self._focus_visible = False
         self._animation = QPropertyAnimation(self, b"offset", self)
         self._animation.setDuration(160)
         self._animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -89,6 +172,20 @@ class ToggleSwitch(QAbstractButton):
         if changed and self.signalsBlocked():
             self._animation.stop()
             self.offset = 1.0 if checked else 0.0
+
+    def focusInEvent(self, event) -> None:
+        self._focus_visible = event.reason() in (
+            Qt.FocusReason.TabFocusReason,
+            Qt.FocusReason.BacktabFocusReason,
+            Qt.FocusReason.ShortcutFocusReason,
+        )
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event) -> None:
+        self._focus_visible = False
+        super().focusOutEvent(event)
+        self.update()
 
     def _get_offset(self) -> float:
         return self._offset
@@ -117,7 +214,7 @@ class ToggleSwitch(QAbstractButton):
             track_color = QColor(0, 0, 0, 46)
 
         track_rect = QRectF(0.5, 0.5, self.width() - 1.0, self.height() - 1.0)
-        if self.hasFocus():
+        if self._focus_visible:
             painter.setPen(QPen(QColor(BLUE), 1.0))
         else:
             painter.setPen(Qt.PenStyle.NoPen)
@@ -139,6 +236,9 @@ class ToggleSwitch(QAbstractButton):
 class SegmentedControl(QWidget):
     selectionChanged = pyqtSignal(str)
 
+    #: 设计稿：.segmented{padding:2px} + .seg-btn{height:28px}
+    SEGMENT_HEIGHT = 28
+
     def __init__(self, segments: list[tuple[str, str]], parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("SegmentedControl")
@@ -146,6 +246,7 @@ class SegmentedControl(QWidget):
             QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Fixed,
         )
+        self.setFixedHeight(self.SEGMENT_HEIGHT + 4)
         self._buttons: dict[str, QPushButton] = {}
         self._current_key = ""
 
@@ -158,6 +259,10 @@ class SegmentedControl(QWidget):
             button.setObjectName("SegmentButton")
             button.setCheckable(True)
             button.setProperty("active", False)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            # 分段控件的选中态已经是强视觉反馈，再叠一层焦点框只会变脏。
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setFixedHeight(self.SEGMENT_HEIGHT)
             button.clicked.connect(
                 lambda _checked=False, selected_key=key: self.setCurrentKey(
                     selected_key
@@ -194,6 +299,9 @@ class SegmentedControl(QWidget):
 
 
 class Pill(QLabel):
+    #: 设计稿：.pill{height:22px}
+    PILL_HEIGHT = 22
+
     def __init__(self, text: str = "", tone: str = "default", parent=None) -> None:
         super().__init__(text, parent)
         self.setObjectName("Pill")
@@ -202,6 +310,7 @@ class Pill(QLabel):
             QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Fixed,
         )
+        self.setFixedHeight(self.PILL_HEIGHT)
         self.setTone(tone)
 
     def setTone(self, tone: str) -> None:
@@ -210,6 +319,9 @@ class Pill(QLabel):
 
 
 class KbdBadge(QLabel):
+    #: 设计稿：.kbd{height:21px}
+    KBD_HEIGHT = 21
+
     def __init__(self, text: str, parent=None) -> None:
         super().__init__(text, parent)
         self.setObjectName("Kbd")
@@ -218,6 +330,7 @@ class KbdBadge(QLabel):
             QSizePolicy.Policy.Maximum,
             QSizePolicy.Policy.Fixed,
         )
+        self.setFixedHeight(self.KBD_HEIGHT)
 
 
 # --------------------------------------------------------------------------
@@ -227,9 +340,14 @@ class KbdBadge(QLabel):
 NAV_ICON_SIZE = 17
 NAV_ICON_STROKE = 1.65
 NAV_COLLAPSED_ITEM_SIZE = 36
-# 图标与文字之间的间距：Qt 不支持在 QSS 里设置 QPushButton 的 icon-text 间距，
-# 这里用一个前导空格补足设计稿中的 10px 视觉间隔。
-NAV_LABEL_PREFIX = " "
+#: 设计稿：.sidebar-item{padding:6px 10px} 且图标与文字间隔 10px
+NAV_ICON_LEFT = 10
+NAV_ICON_TEXT_GAP = 10
+NAV_TEXT_RIGHT_PADDING = 8
+#: 兼容保留（旧版用前导空格模拟图标间距，现在已改为自绘）
+NAV_LABEL_PREFIX = ""
+
+_NAV_PIXMAP_CACHE: dict[tuple[str, str, int, int], QPixmap] = {}
 
 
 def _build_nav_icon_geometry(key: str) -> tuple[QPainterPath, list[QPointF]]:
@@ -300,17 +418,30 @@ def _build_nav_icon_geometry(key: str) -> tuple[QPainterPath, list[QPointF]]:
     return path, dots
 
 
-def build_nav_icon(key: str, color: str, size: int = NAV_ICON_SIZE) -> QIcon:
-    """把导航图标绘制成 QIcon，避免额外依赖 QtSvg。"""
-    ratio = 2.0
-    pixmap = QPixmap(int(size * ratio), int(size * ratio))
+def build_nav_pixmap(
+    key: str,
+    color: str,
+    size: int = NAV_ICON_SIZE,
+    ratio: float = 2.0,
+) -> QPixmap:
+    """按屏幕缩放率渲染导航图标，结果缓存复用。
+
+    ratio 传入真实的 devicePixelRatioF（125% 缩放下是 1.25），避免固定
+    2.0 再被缩小到非整数倍而发虚；同时 QPainter 会自动按 pixmap 的
+    devicePixelRatio 工作在逻辑像素上，因此缩放只需 size/24。
+    """
+    ratio = max(1.0, float(ratio))
+    cache_key = (key, str(color), int(size), int(round(ratio * 100)))
+    cached = _NAV_PIXMAP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    pixmap = QPixmap(int(round(size * ratio)), int(round(size * ratio)))
     pixmap.setDevicePixelRatio(ratio)
     pixmap.fill(Qt.GlobalColor.transparent)
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    # QPainter 会按 pixmap 的 devicePixelRatio 自动进入逻辑像素；
-    # 这里只需把 24x24 设计坐标映射到 size，不要再乘一遍 ratio。
     painter.scale(size / 24.0, size / 24.0)
 
     icon_color = QColor(color)
@@ -330,30 +461,86 @@ def build_nav_icon(key: str, color: str, size: int = NAV_ICON_SIZE) -> QIcon:
             painter.drawEllipse(dot, NAV_ICON_STROKE / 2.0, NAV_ICON_STROKE / 2.0)
 
     painter.end()
-    return QIcon(pixmap)
+    _NAV_PIXMAP_CACHE[cache_key] = pixmap
+    return pixmap
 
 
-class SidebarNavButton(QPushButton):
-    """带图标的侧边栏导航项，支持展开/收起两种形态。"""
+def build_nav_icon(key: str, color: str, size: int = NAV_ICON_SIZE) -> QIcon:
+    """把导航图标包成 QIcon（保留给外部调用方使用）。"""
+    return QIcon(build_nav_pixmap(key, color, size, 2.0))
+
+
+def _build_chevron_pixmap(
+    pointing_left: bool,
+    color: str = INK_3,
+    size: int = 14,
+    ratio: float = 2.0,
+) -> QPixmap:
+    ratio = max(1.0, float(ratio))
+    cache_key = (
+        "chevron-left" if pointing_left else "chevron-right",
+        str(color),
+        int(size),
+        int(round(ratio * 100)),
+    )
+    cached = _NAV_PIXMAP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    pixmap = QPixmap(int(round(size * ratio)), int(round(size * ratio)))
+    pixmap.setDevicePixelRatio(ratio)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(size / 16.0, size / 16.0)
+
+    pen = QPen(QColor(color), 1.7)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+
+    path = QPainterPath()
+    if pointing_left:
+        path.moveTo(9.8, 3.5)
+        path.lineTo(5.3, 8.0)
+        path.lineTo(9.8, 12.5)
+    else:
+        path.moveTo(6.2, 3.5)
+        path.lineTo(10.7, 8.0)
+        path.lineTo(6.2, 12.5)
+    painter.drawPath(path)
+    painter.end()
+
+    _NAV_PIXMAP_CACHE[cache_key] = pixmap
+    return pixmap
+
+
+class SidebarNavButton(QAbstractButton):
+    """侧边栏导航项：图标 + 文字完全自绘。
+
+    Qt 无法用 QSS 控制 QPushButton 的图标位置和图标-文字间距，旧实现
+    靠给文字加前导空格“凑”出间距，在不同字体下会微妙偏移。这里改成
+    自己画：背景圆角 8px、图标左边距 10px、文字 13px，与设计稿一致。
+    """
 
     def __init__(self, key: str, text: str, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("SidebarItem")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setIconSize(QSize(NAV_ICON_SIZE, NAV_ICON_SIZE))
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
 
         self._key = key
         self._label_text = text
         self._is_active = False
         self._is_collapsed = False
-        self._normal_icon = build_nav_icon(key, INK_2)
-        self._active_icon = build_nav_icon(key, BLUE)
 
+        self.setText(text)
         self.setProperty("active", False)
         self.setProperty("collapsed", False)
-        self.setText(NAV_LABEL_PREFIX + text)
-        self.setIcon(self._normal_icon)
+        self.setFixedHeight(NAV_ITEM_HEIGHT)
 
     def key(self) -> str:
         return self._key
@@ -364,31 +551,114 @@ class SidebarNavButton(QPushButton):
     def isActive(self) -> bool:
         return self._is_active
 
+    def isCollapsed(self) -> bool:
+        return self._is_collapsed
+
     def setActive(self, active: bool) -> None:
         self._is_active = bool(active)
         self.setProperty("active", self._is_active)
-        self.setIcon(self._active_icon if self._is_active else self._normal_icon)
-        refresh_widget_style(self)
+        self.update()
 
     def setCollapsed(self, collapsed: bool) -> None:
         self._is_collapsed = bool(collapsed)
         self.setProperty("collapsed", self._is_collapsed)
 
         if self._is_collapsed:
-            self.setText("")
             self.setToolTip(self._label_text)
             self.setFixedSize(NAV_COLLAPSED_ITEM_SIZE, NAV_COLLAPSED_ITEM_SIZE)
         else:
-            self.setText(NAV_LABEL_PREFIX + self._label_text)
             self.setToolTip("")
-            self.setMinimumSize(0, 34)
-            self.setMaximumSize(16777215, 16777215)
+            self.setMinimumWidth(0)
+            self.setMaximumWidth(16777215)
+            self.setFixedHeight(NAV_ITEM_HEIGHT)
 
-        refresh_widget_style(self)
+        self.updateGeometry()
+        self.update()
+
+    def _label_font(self) -> QFont:
+        font = QFont(self.font())
+        font.setPixelSize(13)
+        font.setWeight(
+            QFont.Weight.DemiBold if self._is_active else QFont.Weight.Medium
+        )
+        return font
+
+    def sizeHint(self) -> QSize:
+        if self._is_collapsed:
+            return QSize(NAV_COLLAPSED_ITEM_SIZE, NAV_COLLAPSED_ITEM_SIZE)
+
+        text_width = QFontMetrics(self._label_font()).horizontalAdvance(
+            self._label_text
+        )
+        width = (
+            NAV_ICON_LEFT
+            + NAV_ICON_SIZE
+            + NAV_ICON_TEXT_GAP
+            + text_width
+            + NAV_TEXT_RIGHT_PADDING
+        )
+        return QSize(width, NAV_ITEM_HEIGHT)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        if self._is_active:
+            background = QColor(BLUE_SOFT)
+        elif self.isDown():
+            background = QColor(0, 0, 0, 20)
+        elif self.underMouse():
+            background = QColor(0, 0, 0, 10)
+        else:
+            background = None
+
+        if background is not None:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(
+                QRectF(self.rect()),
+                float(RADIUS_CONTROL),
+                float(RADIUS_CONTROL),
+            )
+
+        color = BLUE if self._is_active else INK_2
+        pixmap = build_nav_pixmap(
+            self._key,
+            color,
+            NAV_ICON_SIZE,
+            self.devicePixelRatioF(),
+        )
+        icon_top = int(round((self.height() - NAV_ICON_SIZE) / 2.0))
+
+        if self._is_collapsed:
+            icon_left = int(round((self.width() - NAV_ICON_SIZE) / 2.0))
+            painter.drawPixmap(icon_left, icon_top, pixmap)
+            return
+
+        painter.drawPixmap(NAV_ICON_LEFT, icon_top, pixmap)
+
+        font = self._label_font()
+        painter.setFont(font)
+        painter.setPen(QColor(color))
+
+        text_left = NAV_ICON_LEFT + NAV_ICON_SIZE + NAV_ICON_TEXT_GAP
+        text_width = max(0, self.width() - text_left - NAV_TEXT_RIGHT_PADDING)
+        elided = QFontMetrics(font).elidedText(
+            self._label_text,
+            Qt.TextElideMode.ElideRight,
+            text_width,
+        )
+        painter.drawText(
+            QRect(text_left, 0, text_width, self.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            elided,
+        )
 
 
 class SidebarToggleButton(QPushButton):
     """悬在侧边栏右边界上的圆形收起/展开按钮。"""
+
+    ICON_SIZE = 14
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -396,47 +666,38 @@ class SidebarToggleButton(QPushButton):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedSize(SIDEBAR_TOGGLE_SIZE, SIDEBAR_TOGGLE_SIZE)
-        self.setIconSize(QSize(14, 14))
+        self.setIconSize(QSize(self.ICON_SIZE, self.ICON_SIZE))
 
-        self._collapse_icon = self._build_chevron_icon(pointing_left=True)
-        self._expand_icon = self._build_chevron_icon(pointing_left=False)
+        self._is_collapsed = False
+        self._is_hovered = False
         self.setCollapsed(False)
 
-    @staticmethod
-    def _build_chevron_icon(pointing_left: bool, size: int = 14) -> QIcon:
-        ratio = 2.0
-        pixmap = QPixmap(int(size * ratio), int(size * ratio))
-        pixmap.setDevicePixelRatio(ratio)
-        pixmap.fill(Qt.GlobalColor.transparent)
+    def enterEvent(self, event) -> None:
+        self._is_hovered = True
+        self._refresh_icon()
+        super().enterEvent(event)
 
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.scale(size / 16.0, size / 16.0)
+    def leaveEvent(self, event) -> None:
+        self._is_hovered = False
+        self._refresh_icon()
+        super().leaveEvent(event)
 
-        pen = QPen(QColor(INK_3), 1.7)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-
-        path = QPainterPath()
-        if pointing_left:
-            path.moveTo(9.8, 3.5)
-            path.lineTo(5.3, 8.0)
-            path.lineTo(9.8, 12.5)
-        else:
-            path.moveTo(6.2, 3.5)
-            path.lineTo(10.7, 8.0)
-            path.lineTo(6.2, 12.5)
-        painter.drawPath(path)
-        painter.end()
-        return QIcon(pixmap)
+    def _refresh_icon(self) -> None:
+        # QSS 只能改文字颜色，图标颜色需要跟着 hover 手动切。
+        pixmap = _build_chevron_pixmap(
+            pointing_left=not self._is_collapsed,
+            color=BLUE if self._is_hovered else INK_3,
+            size=self.ICON_SIZE,
+            ratio=self.devicePixelRatioF(),
+        )
+        self.setIcon(QIcon(pixmap))
 
     def setCollapsed(self, collapsed: bool) -> None:
-        if collapsed:
-            self.setIcon(self._expand_icon)
+        self._is_collapsed = bool(collapsed)
+        if self._is_collapsed:
             self.setToolTip("展开侧边栏")
             self.setAccessibleName("展开侧边栏")
         else:
-            self.setIcon(self._collapse_icon)
             self.setToolTip("收起侧边栏")
             self.setAccessibleName("收起侧边栏")
+        self._refresh_icon()

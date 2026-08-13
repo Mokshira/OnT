@@ -4,34 +4,49 @@ from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QWidget
 
 
+# --------------------------------------------------------------------------
+# 颜色令牌（与设计稿 index.css 的 :root 一一对应）
+# --------------------------------------------------------------------------
 WINDOW_BG = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:1 #fafafa)"
 BG_BASE = "#fafafa"
 SURFACE = "#ffffff"
 SURFACE_2 = "#f4f4f5"
+# 设计稿里按钮 hover 是 filter:brightness(.97)，QSS 没有滤镜，
+# 因此把变暗后的结果预先算成静态颜色。
+SURFACE_3 = "#e9e9ec"
 SIDEBAR_BG = "#fafafa"
 NAV_HOVER = "rgba(0, 0, 0, 10)"
+NAV_PRESSED = "rgba(0, 0, 0, 20)"
 LINE = "#e4e4e7"
 LINE_STRONG = "#d4d4d8"
 LINE_SOFT = "#f4f4f5"
 INK = "#09090b"
+INK_HOVER = "#27272a"
+INK_PRESSED = "#18181b"
 INK_2 = "#3f3f46"
 INK_3 = "#71717a"
 INK_4 = "#a1a1aa"
 INK_5 = "#d4d4d8"
 BLUE = "#2563eb"
 BLUE_HOVER = "#1d4ed8"
+BLUE_PRESSED = "#1e40af"
 BLUE_SOFT = "#eff4ff"
+BLUE_SOFT_STRONG = "#e0e9ff"
 BLUE_RING = "rgba(37, 99, 235, 56)"
 OK = "#16a34a"
 OK_SOFT = "#ecfdf5"
 WARN = "#d97706"
 WARN_SOFT = "#fff7ed"
 ERR = "#dc2626"
+ERR_SOFT = "#fef2f2"
+ERR_BORDER = "#fca5a5"
 SEG_BG = "rgba(0, 0, 0, 10)"
 TOGGLE_OFF = "rgba(0, 0, 0, 46)"
 TOAST_BG = "#18181b"
 
-# 新 UI 的尺寸令牌（与设计稿 index.css 中的数值一致）。
+# --------------------------------------------------------------------------
+# 尺寸令牌
+# --------------------------------------------------------------------------
 RADIUS_CARD = 14
 RADIUS_PANEL = 12
 RADIUS_CONTROL = 8
@@ -41,6 +56,13 @@ SIDEBAR_COLLAPSED_WIDTH = 52
 SIDEBAR_TOGGLE_SIZE = 26
 CONTENT_MARGIN = 14
 TOAST_BOTTOM_OFFSET = 28
+# 设计稿：.sidebar{gap:6px} / .sidebar-item{height:34px}
+NAV_ITEM_HEIGHT = 34
+NAV_ITEM_SPACING = 6
+# 设计稿：.btn{height:34px} / .combo{height:36px} / 正文基准字号 13px
+CONTROL_HEIGHT = 34
+COMBO_HEIGHT = 36
+BASE_FONT_PIXEL_SIZE = 13
 
 FONT_FAMILIES = [
     "Segoe UI Variable Display",
@@ -173,6 +195,7 @@ def build_stylesheet() -> str:
         border: none;
     }}
 
+    /* ---------------- 按钮 ---------------- */
     QPushButton {{
         min-height: 18px;
         padding: 7px 14px;
@@ -186,8 +209,8 @@ def build_stylesheet() -> str:
     QPushButton:hover {{
         background: {NAV_HOVER};
     }}
-    QPushButton:focus {{
-        border: 1px solid {BLUE};
+    QPushButton:pressed {{
+        background: {NAV_PRESSED};
     }}
     QPushButton:disabled {{
         background: {SURFACE_2};
@@ -202,8 +225,13 @@ def build_stylesheet() -> str:
     }}
     QPushButton[variant="primary"]:hover,
     QPushButton#PrimaryButton:hover {{
-        background: #27272a;
-        border-color: #27272a;
+        background: {INK_HOVER};
+        border-color: {INK_HOVER};
+    }}
+    QPushButton[variant="primary"]:pressed,
+    QPushButton#PrimaryButton:pressed {{
+        background: {INK_PRESSED};
+        border-color: {INK_PRESSED};
     }}
     QPushButton[variant="blue"] {{
         background: {BLUE};
@@ -213,6 +241,10 @@ def build_stylesheet() -> str:
     QPushButton[variant="blue"]:hover {{
         background: {BLUE_HOVER};
         border-color: {BLUE_HOVER};
+    }}
+    QPushButton[variant="blue"]:pressed {{
+        background: {BLUE_PRESSED};
+        border-color: {BLUE_PRESSED};
     }}
     QPushButton[variant="ghost"],
     QPushButton#SecondaryButton {{
@@ -224,19 +256,40 @@ def build_stylesheet() -> str:
     QPushButton#SecondaryButton:hover {{
         background: {NAV_HOVER};
     }}
+    QPushButton[variant="ghost"]:pressed,
+    QPushButton#SecondaryButton:pressed {{
+        background: {NAV_PRESSED};
+    }}
     QPushButton[variant="soft"],
     QPushButton#SecondaryButton:checked {{
         background: {SURFACE_2};
         color: {INK_2};
         border-color: transparent;
     }}
+    QPushButton[variant="soft"]:hover,
+    QPushButton#SecondaryButton:checked:hover {{
+        background: {SURFACE_3};
+    }}
+    QPushButton[variant="soft"]:pressed,
+    QPushButton#SecondaryButton:checked:pressed {{
+        background: {LINE};
+    }}
     QPushButton[variant="danger"] {{
         background: transparent;
         color: {ERR};
         border-color: {LINE_STRONG};
     }}
+    QPushButton[variant="danger"]:hover {{
+        background: {ERR_SOFT};
+        border-color: {ERR_BORDER};
+    }}
+    QPushButton[variant="danger"]:pressed {{
+        background: #fee2e2;
+        border-color: {ERR_BORDER};
+    }}
 
-    QPushButton#SidebarItem,
+    /* 侧边栏导航项由 SidebarNavButton 自行绘制（图标 + 文字精确对齐），
+       这里仅保留旧的设置导航样式。 */
     QPushButton#SettingsNavItem {{
         min-height: 20px;
         padding: 6px 10px;
@@ -247,19 +300,13 @@ def build_stylesheet() -> str:
         font-weight: 500;
         text-align: left;
     }}
-    QPushButton#SidebarItem:hover,
     QPushButton#SettingsNavItem:hover {{
         background: {NAV_HOVER};
     }}
-    QPushButton#SidebarItem[active="true"],
     QPushButton#SettingsNavItem[active="true"] {{
         background: {BLUE_SOFT};
         color: {BLUE};
         font-weight: 600;
-    }}
-    QPushButton#SidebarItem[collapsed="true"] {{
-        padding: 0px;
-        text-align: center;
     }}
     QPushButton#SidebarToggle {{
         min-width: {SIDEBAR_TOGGLE_SIZE}px;
@@ -277,7 +324,12 @@ def build_stylesheet() -> str:
         border-color: {BLUE};
         color: {BLUE};
     }}
+    QPushButton#SidebarToggle:pressed {{
+        background: {BLUE_SOFT_STRONG};
+        border-color: {BLUE};
+    }}
 
+    /* ---------------- 输入控件 ---------------- */
     QLineEdit,
     QPlainTextEdit,
     QTextBrowser,
@@ -292,10 +344,17 @@ def build_stylesheet() -> str:
         selection-color: {INK};
         font-size: 13px;
     }}
+    QLineEdit:hover,
+    QPlainTextEdit:hover,
+    QComboBox:hover,
+    QKeySequenceEdit:hover {{
+        border-color: {LINE_STRONG};
+    }}
     QLineEdit:focus,
     QPlainTextEdit:focus,
     QTextBrowser:focus,
     QComboBox:focus,
+    QComboBox:on,
     QKeySequenceEdit:focus {{
         border-color: {BLUE};
     }}
@@ -313,6 +372,15 @@ def build_stylesheet() -> str:
     QComboBox {{
         min-height: 20px;
         padding-right: 32px;
+    }}
+    /* 可编辑下拉框的内嵌输入框：去掉套套叠叠的第二层边框与底色。 */
+    QComboBox QLineEdit {{
+        background: transparent;
+        border: none;
+        border-radius: 0px;
+        padding: 0px;
+        color: {INK};
+        font-size: 13px;
     }}
     QComboBox::drop-down {{
         subcontrol-origin: padding;
@@ -336,7 +404,18 @@ def build_stylesheet() -> str:
         outline: none;
         padding: 4px;
     }}
+    QComboBox QAbstractItemView::item {{
+        min-height: 26px;
+        padding: 0px 8px;
+        border: none;
+        border-radius: {RADIUS_SM}px;
+    }}
+    QComboBox QAbstractItemView::item:hover {{
+        background: {SURFACE_2};
+        color: {INK};
+    }}
 
+    /* ---------------- 小组件 ---------------- */
     QWidget#SegmentedControl {{
         background: {SEG_BG};
         border: none;
@@ -356,11 +435,23 @@ def build_stylesheet() -> str:
         color: {INK};
         background: transparent;
     }}
+    QPushButton#SegmentButton:pressed {{
+        background: transparent;
+    }}
     QPushButton#SegmentButton[active="true"] {{
         color: {INK};
         background: {SURFACE};
         border-color: {LINE};
         font-weight: 600;
+    }}
+    QPushButton#SegmentButton:disabled {{
+        background: transparent;
+        color: {INK_5};
+    }}
+    QPushButton#SegmentButton[active="true"]:disabled {{
+        background: {SURFACE};
+        border-color: {LINE};
+        color: {INK_4};
     }}
 
     QLabel#Pill {{
@@ -411,6 +502,9 @@ def build_stylesheet() -> str:
         background: {BG_BASE};
         border-color: {LINE_SOFT};
     }}
+    QTextBrowser#ResultOutput:focus {{
+        border-color: {LINE_STRONG};
+    }}
     QLabel#Toast {{
         padding: 8px 16px;
         background: {TOAST_BG};
@@ -421,9 +515,21 @@ def build_stylesheet() -> str:
         font-weight: 600;
     }}
 
+    /* 收起后的导航完全依赖 tooltip，因此它也需要跟设计稿一致。 */
+    QToolTip {{
+        background: {TOAST_BG};
+        color: #fafafa;
+        border: none;
+        border-radius: {RADIUS_SM}px;
+        padding: 5px 8px;
+        font-size: 11px;
+        font-weight: 500;
+    }}
+
+    /* ---------------- 滚动条 ---------------- */
     QScrollBar:vertical {{
         width: 6px;
-        margin: 0;
+        margin: 2px 2px 2px 0;
         background: transparent;
     }}
     QScrollBar::handle:vertical {{
@@ -433,6 +539,9 @@ def build_stylesheet() -> str:
     }}
     QScrollBar::handle:vertical:hover {{
         background: rgba(0, 0, 0, 72);
+    }}
+    QScrollBar::handle:vertical:pressed {{
+        background: rgba(0, 0, 0, 96);
     }}
     QScrollBar::add-line:vertical,
     QScrollBar::sub-line:vertical,
@@ -444,13 +553,16 @@ def build_stylesheet() -> str:
     }}
     QScrollBar:horizontal {{
         height: 6px;
-        margin: 0;
+        margin: 0 2px 2px 2px;
         background: transparent;
     }}
     QScrollBar::handle:horizontal {{
         min-width: 24px;
         background: rgba(0, 0, 0, 46);
         border-radius: 3px;
+    }}
+    QScrollBar::handle:horizontal:hover {{
+        background: rgba(0, 0, 0, 72);
     }}
     QScrollBar::add-line:horizontal,
     QScrollBar::sub-line:horizontal,
@@ -467,6 +579,8 @@ def apply_window_theme(widget: QWidget) -> None:
     """Apply the theme to one window without touching QApplication state."""
     font = QFont()
     font.setFamilies(FONT_FAMILIES)
-    font.setPointSize(10)
+    # 设计稿的字号全部是 px；基准字体也用 px 才能与 QSS 对得上，
+    # 否则 pt/px 混用会让没被 QSS 命中的控件（菜单、下拉项）字号偏大。
+    font.setPixelSize(BASE_FONT_PIXEL_SIZE)
     widget.setFont(font)
     widget.setStyleSheet(build_stylesheet())

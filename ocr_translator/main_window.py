@@ -3,12 +3,13 @@ from __future__ import annotations
 from PyQt6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
+    QSize,
     Qt,
     QTimer,
     QVariantAnimation,
     pyqtSignal,
 )
-from PyQt6.QtGui import QFontMetrics, QPixmap, QTextCursor
+from PyQt6.QtGui import QFont, QFontMetrics, QPixmap, QTextCursor
 from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsOpacityEffect,
@@ -37,6 +38,7 @@ from .floating_window import render_markdown_preserving_line_breaks
 from .settings_pages import SettingsPages
 from .theme import (
     CONTENT_MARGIN,
+    NAV_ITEM_SPACING,
     SIDEBAR_COLLAPSED_WIDTH,
     SIDEBAR_TOGGLE_SIZE,
     SIDEBAR_WIDTH,
@@ -49,6 +51,7 @@ from .ui_widgets import (
     SidebarNavButton,
     SidebarToggleButton,
     ToggleSwitch,
+    apply_line_height,
     refresh_widget_style,
 )
 
@@ -66,6 +69,8 @@ class MainWindow(QMainWindow):
         ("about", "关于"),
     )
     SETTINGS_PAGE_KEYS = ("api", "prompt", "shortcut", "about")
+    #: 设计稿 .result-output 的行高（1.7 → 170%）
+    RESULT_LINE_HEIGHT_PERCENT = 170
 
     def __init__(self) -> None:
         super().__init__()
@@ -179,6 +184,11 @@ class MainWindow(QMainWindow):
         self.brand_label = QLabel("OnT")
         self.brand_label.setObjectName("AppBrand")
         self.brand_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 设计稿 .app-brand 的 letter-spacing 是 -0.045em（26px 字号约 -1.2px），
+        # QSS 无法表达字距，只能在 QFont 上设。
+        brand_font = QFont(self.brand_label.font())
+        brand_font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, -1.2)
+        self.brand_label.setFont(brand_font)
         layout.addWidget(self.brand_label)
         layout.addSpacing(20)
 
@@ -186,7 +196,7 @@ class MainWindow(QMainWindow):
         nav_container.setObjectName("SidebarNav")
         nav_layout = QVBoxLayout(nav_container)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        nav_layout.setSpacing(4)
+        nav_layout.setSpacing(NAV_ITEM_SPACING)
         self._nav_layout = nav_layout
 
         for key, text in self.NAV_ITEMS:
@@ -261,6 +271,10 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # QScrollArea 默认带一层下沉边框，会在内容卡片里多画一道灰线。
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.viewport().setObjectName("ContentViewport")
+        scroll.viewport().setAutoFillBackground(False)
         viewport = QWidget()
         viewport.setObjectName("ContentViewport")
         content_layout = QVBoxLayout(viewport)
@@ -320,11 +334,14 @@ class MainWindow(QMainWindow):
 
         self.capture_button = QPushButton("开始框选")
         self.capture_button.setProperty("variant", "primary")
+        self.capture_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.capture_button.setMinimumWidth(96)
         self.capture_button.setToolTip("打开截图选区工具")
 
         self.clipboard_button = QPushButton("剪贴板自动处理：已关闭")
         self.clipboard_button.setObjectName("SecondaryButton")
         self.clipboard_button.setCheckable(True)
+        self.clipboard_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clipboard_button.setToolTip("监控剪贴板中的图片并自动识别")
 
         layout.addWidget(
@@ -461,6 +478,9 @@ class MainWindow(QMainWindow):
 
         self.copy_ocr_button = QPushButton("复制结果")
         self.copy_ocr_button.setProperty("variant", "ghost")
+        self.copy_ocr_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_ocr_button.setMinimumWidth(88)
+        self.copy_ocr_button.setToolTip("把当前 OCR 原文复制到剪贴板")
         layout.addWidget(
             self._page_header(
                 "RESULTS",
@@ -506,6 +526,9 @@ class MainWindow(QMainWindow):
             "完成截图后，OCR 识别结果会显示在这里。"
         )
         self.ocr_result_output.setMinimumSize(250, 270)
+        # 文档自带 4px 内边距，会叠在 QSS 的 padding 上，让文字对不齐卡片。
+        self.ocr_result_output.document().setDocumentMargin(0)
+        apply_line_height(self.ocr_result_output, self.RESULT_LINE_HEIGHT_PERCENT)
         text_layout.addWidget(result_title)
         text_layout.addWidget(self.ocr_result_output, 1)
 
@@ -623,26 +646,47 @@ class MainWindow(QMainWindow):
         for item_key, button in self._nav_buttons.items():
             button.setActive(item_key == key)
 
+        if self._page_animation is not None:
+            # stop() 不会发出 finished，这里手动收尾，
+            # 否则被打断的那一页会永远停在半透明状态。
+            self._page_animation.stop()
+            self._page_animation = None
+        self._clear_all_page_effects()
+
         if not animate or not self.isVisible():
             return
 
-        if self._page_animation is not None:
-            self._page_animation.stop()
-
         page = self.page_stack.widget(index)
-        effect = self._page_effects.get(index)
-        if effect is None:
-            effect = QGraphicsOpacityEffect(page)
-            page.setGraphicsEffect(effect)
-            self._page_effects[index] = effect
-
+        # QGraphicsOpacityEffect 会把整页改成离屏合成渲染：文字发虚、滚动变重。
+        # 因此只在淡入期间挂上它，动画结束立刻摘掉，静态时回到原生渲染。
+        effect = QGraphicsOpacityEffect(page)
         effect.setOpacity(0.0)
-        self._page_animation = QPropertyAnimation(effect, b"opacity", self)
-        self._page_animation.setDuration(180)
-        self._page_animation.setStartValue(0.0)
-        self._page_animation.setEndValue(1.0)
-        self._page_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._page_animation.start()
+        page.setGraphicsEffect(effect)
+        self._page_effects[index] = effect
+
+        animation = QPropertyAnimation(effect, b"opacity", self)
+        animation.setDuration(180)
+        animation.setStartValue(0.0)
+        animation.setEndValue(1.0)
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.finished.connect(
+            lambda page_index=index: self._clear_page_effect(page_index)
+        )
+        self._page_animation = animation
+        animation.start()
+
+    def _clear_page_effect(self, index: int) -> None:
+        """摘掉指定页的透明度特效，让它回到原生渲染路径。"""
+        effect = self._page_effects.pop(index, None)
+        if effect is None:
+            return
+        page = self.page_stack.widget(index)
+        if page is not None:
+            page.setGraphicsEffect(None)
+
+    def _clear_all_page_effects(self) -> None:
+        for index in list(self._page_effects.keys()):
+            self._clear_page_effect(index)
 
     def set_models_fetching(self, is_fetching: bool) -> None:
         """同步模型拉取状态，并锁定所有会改变结果绑定目标的入口。"""
@@ -1002,13 +1046,15 @@ class MainWindow(QMainWindow):
     def update_ocr_result(self, text: str) -> None:
         # 完整渲染入口：占位提示、错误提示与最终结果都走这里。
         # 流式增量不再走此方法（见 append_ocr_stream_text），因此一次
-        # 请求中全文 Markdown 解析渲染只发生一次（请求结束时）。
+        # 请求中全文 Markdown ��析渲染只发生一次（请求结束时）。
         self._is_ocr_streaming = False
         self._ocr_stream_parts = []
         self._ocr_result_text = text.strip()
         self.ocr_result_output.setMarkdown(
             render_markdown_preserving_line_breaks(self._ocr_result_text)
         )
+        # setMarkdown 会重建文档，行高需要重新应用。
+        apply_line_height(self.ocr_result_output, self.RESULT_LINE_HEIGHT_PERCENT)
 
     def begin_ocr_stream(self) -> None:
         """进入 OCR 流式显示模式：清空旧内容，等待纯文本增量追加。"""
@@ -1016,6 +1062,8 @@ class MainWindow(QMainWindow):
         self._ocr_stream_parts = []
         self._ocr_result_text = ""
         self.ocr_result_output.clear()
+        # 流式追加的文本会继承当前段落格式，因此只需在开头设一次行高。
+        apply_line_height(self.ocr_result_output, self.RESULT_LINE_HEIGHT_PERCENT)
 
     def append_ocr_stream_text(self, delta: str) -> None:
         """
@@ -1128,11 +1176,22 @@ class MainWindow(QMainWindow):
     def _render_preview(self) -> None:
         if self._preview_source_pixmap.isNull():
             return
+
+        # 高 DPI 屏上先按逻辑像素缩小会白丢一半分辨率，预览图看起来发虚；
+        # 改成按真实设备像素缩放，再把 devicePixelRatio 交回给 Qt。
+        # 同时给虚线边框留出 1px，避免图片盖住卡片描边。
+        ratio = max(1.0, self.preview_label.devicePixelRatioF())
+        label_size = self.preview_label.size()
+        target_size = QSize(
+            max(1, int(round((label_size.width() - 2) * ratio))),
+            max(1, int(round((label_size.height() - 2) * ratio))),
+        )
         scaled = self._preview_source_pixmap.scaled(
-            self.preview_label.size(),
+            target_size,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
+        scaled.setDevicePixelRatio(ratio)
         self.preview_label.setText("")
         self.preview_label.setPixmap(scaled)
 

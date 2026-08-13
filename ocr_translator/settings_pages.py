@@ -6,7 +6,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -17,6 +16,7 @@ from PyQt6.QtWidgets import (
 from .config_manager import DEFAULT_MODEL_NAME, DEFAULT_REFRESH_SHORTCUT
 from .ui_widgets import (
     Pill,
+    PromptTextEdit,
     SegmentedControl,
     ShortcutCaptureEdit,
     StyledComboBox,
@@ -86,6 +86,10 @@ class SettingsPages(QObject):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # QScrollArea 默认带一层下沉边框，会在内容卡片里多画一道灰线。
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.viewport().setObjectName("SettingsPageViewport")
+        scroll.viewport().setAutoFillBackground(False)
 
         viewport = QWidget()
         viewport.setObjectName("SettingsPageViewport")
@@ -127,6 +131,8 @@ class SettingsPages(QObject):
 
         save_button = QPushButton("保存设置")
         save_button.setProperty("variant", "blue")
+        save_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_button.setMinimumWidth(96)
         save_button.setToolTip("验证并保存当前 OCR、翻译和快捷键配置")
         save_button.clicked.connect(lambda _checked=False: self.saveRequested.emit())
         actions_layout.addWidget(save_button)
@@ -220,6 +226,14 @@ class SettingsPages(QObject):
         self.update_api_profile_button.setProperty("variant", "soft")
         self.delete_api_profile_button = QPushButton("删除")
         self.delete_api_profile_button.setProperty("variant", "danger")
+        for compact_button in (
+            self.add_api_profile_button,
+            self.update_api_profile_button,
+            self.delete_api_profile_button,
+        ):
+            # 设计稿里这组按钮宽度一致，不随文字长度变形。
+            compact_button.setMinimumWidth(60)
+            compact_button.setCursor(Qt.CursorShape.PointingHandCursor)
         profile_layout.addWidget(self.api_profile_combo, 1)
         profile_layout.addWidget(self.add_api_profile_button)
         profile_layout.addWidget(self.update_api_profile_button)
@@ -248,7 +262,8 @@ class SettingsPages(QObject):
         self.api_key_input.setPlaceholderText("输入访问密钥")
         self.toggle_api_key_button = QPushButton("显示")
         self.toggle_api_key_button.setProperty("variant", "ghost")
-        self.toggle_api_key_button.setMinimumWidth(58)
+        self.toggle_api_key_button.setMinimumWidth(60)
+        self.toggle_api_key_button.setCursor(Qt.CursorShape.PointingHandCursor)
         api_key_layout.addWidget(self.api_key_input, 1)
         api_key_layout.addWidget(self.toggle_api_key_button)
         layout.addWidget(
@@ -284,8 +299,12 @@ class SettingsPages(QObject):
         self.model_name_combo.setCurrentText(DEFAULT_MODEL_NAME)
         self.fetch_models_button = QPushButton("拉取模型")
         self.fetch_models_button.setProperty("variant", "ghost")
+        self.fetch_models_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fetch_models_button.setMinimumWidth(84)
         self.cancel_fetch_models_button = QPushButton("取消")
         self.cancel_fetch_models_button.setProperty("variant", "ghost")
+        self.cancel_fetch_models_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_fetch_models_button.setMinimumWidth(60)
         self.cancel_fetch_models_button.hide()
         model_layout.addWidget(self.model_name_combo, 1)
         model_layout.addWidget(self.fetch_models_button)
@@ -339,7 +358,7 @@ class SettingsPages(QObject):
         layout.addWidget(self.prompt_label)
         layout.addSpacing(8)
 
-        self.prompt_input = QPlainTextEdit()
+        self.prompt_input = PromptTextEdit()
         self.prompt_input.setMinimumHeight(220)
         self.prompt_input.setPlaceholderText("输入发送给模型的提示词")
         layout.addWidget(self.prompt_input, 1)
