@@ -231,7 +231,6 @@ class ApiWorker(QObject):
                     "content": content,
                 }
             ],
-            "temperature": 0.2,
             "stream": True,
             "stream_options": {
                 "include_usage": True,
