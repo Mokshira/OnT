@@ -656,7 +656,7 @@ class SidebarNavButton(QAbstractButton):
 
 
 class SidebarToggleButton(QPushButton):
-    """悬在侧边栏右边界上的圆形收起/展开按钮。"""
+    """垂直居中悬浮在侧边栏右边界上的圆形收起/展开按钮（抽屉把手样式）。"""
 
     ICON_SIZE = 14
 

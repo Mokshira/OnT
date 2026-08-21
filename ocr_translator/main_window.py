@@ -155,7 +155,8 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(content_card)
         root_layout.addWidget(content_area, 1)
 
-        # 收起按钮悬在侧边栏右侧边界上，因此不进入布局，而是手动定位。
+        # 收起按钮垂直居中悬浮在侧边栏右侧边界上（抽屉把手样式），
+        # 因此不进入布局，而是手动定位。
         self.sidebar_toggle_button = SidebarToggleButton(central)
         self._sidebar_animation = QVariantAnimation(self)
         self._sidebar_animation.setDuration(180)
@@ -212,9 +213,12 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "sidebar_toggle_button"):
             return
         width = self.sidebar.width() if sidebar_width is None else int(sidebar_width)
+        # 水平：按钮圆心压在侧边栏右边界上；
+        # 垂直：随侧边栏全高居中（抽屉把手样式），不再与顶部品牌区拥挤，
+        # 收起后的窄栏也无需为按钮预留顶部空隙。
         self.sidebar_toggle_button.move(
             max(0, width - (SIDEBAR_TOGGLE_SIZE // 2)),
-            18,
+            max(0, (self.sidebar.height() - SIDEBAR_TOGGLE_SIZE) // 2),
         )
         self.sidebar_toggle_button.raise_()
 
@@ -239,8 +243,6 @@ class MainWindow(QMainWindow):
         self._sidebar_layout.setContentsMargins(
             *((8, 18, 8, 16) if collapsed else (16, 18, 16, 16))
         )
-        # 收起后顶部留出收起按钮的位置。
-        self._nav_layout.setContentsMargins(0, 34 if collapsed else 0, 0, 0)
         for button in self._nav_buttons.values():
             button.setCollapsed(collapsed)
         self.sidebar_toggle_button.setCollapsed(collapsed)
