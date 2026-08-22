@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import json
 import threading
 from typing import Any, Callable, Optional
@@ -245,17 +246,61 @@ class ApiWorker(QObject):
         should_cancel: Callable[[], bool] | None = None,
     ) -> str:
         content_type = response.headers.get("Content-Type", "").lower()
+        line_iter = response.iter_lines(decode_unicode=False)
 
-        if "text/event-stream" in content_type:
+        is_sse = "text/event-stream" in content_type
+        sniffed_lines: list[bytes] = []
+        if not is_sse:
+            # 不能只信 Content-Type：不少反向代理 / 本地推理服务返回的是标准
+            # SSE，却带着 application/json 甚至空的 Content-Type。而本类的
+            # payload 中 stream 恒为 True，一旦误判就会拿整段 SSE 正文去做
+            # JSON 解析。这里嗅探首个非空行是否为 SSE 帧前缀，读走的行随后
+            # 原样补回，不会丢失第一个 chunk。
+            for raw_line in line_iter:
+                sniffed_lines.append(raw_line)
+                if should_cancel is not None and should_cancel():
+                    return ""
+                if not raw_line:
+                    continue
+                head = raw_line.decode("utf-8", errors="replace").lstrip()
+                is_sse = head.startswith("data:") or head.startswith("event:")
+                break
+
+        if is_sse:
             streamed_text = cls._extract_text_from_sse(
                 response,
                 progress_callback=progress_callback,
                 should_cancel=should_cancel,
+                line_iter=itertools.chain(sniffed_lines, line_iter),
             )
             if streamed_text:
                 return streamed_text
 
-        data = response.json()
+            # iter_lines 已经把响应体消费干净，此处绝不能再回落
+            # response.json()：对已消费的流调用 .json() 必然抛
+            # JSONDecodeError，而它同时继承自 RequestException，会被 run()
+            # 归类成“网络请求异常”，给出与真实原因完全无关的报错。
+            # 空结果只有两种可能：被取消，或模型确实没有产出可见内容。
+            if should_cancel is not None and should_cancel():
+                return ""
+            raise ValueError("流式响应已结束，但未解析到任何文本内容。")
+
+        # 非 SSE 分支：嗅探只读走了首行，这里把它与剩余行重新拼回完整
+        # 响应体。合法 JSON 不会在字符串字面量里出现裸换行（必须转义），
+        # 因此按 \n 重组对 JSON 解析是安全的。
+        body = (
+            b"\n".join(itertools.chain(sniffed_lines, line_iter))
+            .decode("utf-8", errors="replace")
+            .strip()
+        )
+        if not body:
+            raise ValueError("接口返回了空响应体。")
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"接口响应不是合法 JSON：{body[:200]}") from exc
+
         return cls._extract_text_from_response(data)
 
     @classmethod
@@ -264,6 +309,7 @@ class ApiWorker(QObject):
         response: requests.Response,
         progress_callback: Callable[[str], None] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        line_iter: Any = None,
     ) -> str:
         """
         逐行解析 SSE 流。
@@ -272,10 +318,17 @@ class ApiWorker(QObject):
         新增的文本，绝不携带全量累计文本（旧实现每个 chunk 对全部累计
         文本 join 一次，累计成本 O(n²)）；完整文本由返回值在流结束时
         一次性 join 给出。
+
+        line_iter 供调用方在“为了嗅探是否为 SSE 而已经读走若干行”时传入
+        补齐后的行迭代器；为 None 时退化为直接消费 response，保持原有调用
+        方式不变。
         """
         text_parts: list[str] = []
 
-        for raw_line in response.iter_lines(decode_unicode=False):
+        if line_iter is None:
+            line_iter = response.iter_lines(decode_unicode=False)
+
+        for raw_line in line_iter:
             if should_cancel is not None and should_cancel():
                 return ""
             if not raw_line:
@@ -501,9 +554,16 @@ class ApiWorker(QObject):
             return True
 
         compact = value.replace("_", "").replace("-", "")
+        # 关键：CJK 字符的 isalnum() 同样返回 True，仅靠 isalnum() 会把
+        # “一行无标点的中文/日文文本”误判成响应 ID 并静默丢弃，而本项目
+        # 的默认目标语言就是简体中文（实测 26 字的中文句子会被误杀）。
+        # 真实的响应 ID 一定是纯 ASCII，且字母与数字混排，据此收紧启发式。
         if (
             len(value) >= 24
+            and compact.isascii()
             and compact.isalnum()
+            and any(char.isdigit() for char in compact)
+            and any(char.isalpha() for char in compact)
             and " " not in value
             and "\n" not in value
         ):

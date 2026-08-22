@@ -22,6 +22,14 @@ dist/
 
 # 本地运行配置（可能包含 API Key）
 config.json
+# ConfigManager 生成的损坏备份 config.json.corrupt-<时间戳>.bak 与原子写
+# 临时文件 .config.json.tmp 都是原文件的字节级副本，同样含明文 API Key，
+# 必须一并忽略，否则 `git add .` 会把密钥提交进仓库。
+config.json.*
+.config.json.tmp
+# 历史遗留文件名（LEGACY_CONFIG_FILE_NAME）
+config.son
+config.son.*
 
 # IDE 与系统文件
 .vscode/

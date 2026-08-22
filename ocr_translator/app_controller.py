@@ -215,7 +215,20 @@ class AppController(QObject):
             config.refresh_shortcut = DEFAULT_REFRESH_SHORTCUT
             self.main_window.set_config(config)
             self.floating_window.apply_appearance_config(config)
-            self._setup_shortcuts(config.refresh_shortcut)
+            try:
+                self._setup_shortcuts(config.refresh_shortcut)
+            except Exception as exc:
+                # 全局快捷键是增强功能，不具备阻断启动的资格。
+                # 默认键（Ctrl+Shift+R）同样可能被其他程序占用，此处若再次
+                # 抛出会穿透 AppController.__init__ 与 main()（控制器在 try
+                # 之外构造），导致打包版双击后无窗口、无提示，用户连改
+                # 快捷键的机会都没有。这里降级为“无全局快捷键”继续启动，
+                # 并把失败原因交给用户。
+                message = f"全局快捷键注册失败，可在「快捷键」页更换：{exc}"
+                QTimer.singleShot(
+                    0,
+                    lambda: self.main_window.show_toast(message),
+                )
 
         # 缓存实际已加载并成功注册快捷键的生效配置。回退分支中的快捷键
         # 已改为默认值，因此后续范围化写盘会让磁盘与实际注册状态收敛。
