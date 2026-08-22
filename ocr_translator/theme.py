@@ -7,7 +7,9 @@ from PyQt6.QtWidgets import QWidget
 # --------------------------------------------------------------------------
 # 颜色令牌（与设计稿 index.css 的 :root 一一对应）
 # --------------------------------------------------------------------------
-WINDOW_BG = "qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #ffffff, stop:1 #fafafa)"
+# 新 UI：窗口底色改为纯 #fafafa。原来的白→灰竖向渐变会让侧边栏（纯 #fafafa）
+# 与窗口背景在不同高度出现色差，收起/展开侧边栏时那道竖直接缝尤其明显。
+WINDOW_BG = "#fafafa"
 BG_BASE = "#fafafa"
 SURFACE = "#ffffff"
 SURFACE_2 = "#f4f4f5"
@@ -40,6 +42,10 @@ WARN_SOFT = "#fff7ed"
 ERR = "#dc2626"
 ERR_SOFT = "#fef2f2"
 ERR_BORDER = "#fca5a5"
+# 新 UI：浅色语义块用的描边，比主色淡一档，避免大面积蓝/橙描边过重。
+BLUE_BORDER = "#c7dbff"
+BLUE_BORDER_HOVER = "#a9c8ff"
+WARN_BORDER = "#fed7aa"
 SEG_BG = "rgba(0, 0, 0, 10)"
 TOGGLE_OFF = "rgba(0, 0, 0, 46)"
 TOAST_BG = "#18181b"
@@ -53,7 +59,15 @@ RADIUS_CONTROL = 8
 RADIUS_SM = 6
 SIDEBAR_WIDTH = 188
 SIDEBAR_COLLAPSED_WIDTH = 52
-SIDEBAR_TOGGLE_SIZE = 26
+# 新 UI：收起按钮从「压在分隔线上的 26px 圆钮」改为侧边栏内右下角的
+# 36x34 浅蓝按钮（设计稿 .sidebar-toggle）。
+SIDEBAR_TOGGLE_WIDTH = 36
+SIDEBAR_TOGGLE_HEIGHT = 34
+SIDEBAR_TOGGLE_MARGIN = 16
+SIDEBAR_TOGGLE_MARGIN_COLLAPSED = 8
+SIDEBAR_TOGGLE_BOTTOM_MARGIN = 14
+#: 兼容旧代码的别名：按钮已不再是正方形，请改用上面的宽/高常量。
+SIDEBAR_TOGGLE_SIZE = SIDEBAR_TOGGLE_HEIGHT
 CONTENT_MARGIN = 14
 TOAST_BOTTOM_OFFSET = 28
 # 设计稿：.sidebar{gap:6px} / .sidebar-item{height:34px}
@@ -169,6 +183,16 @@ def build_stylesheet() -> str:
         border: 1px solid {BLUE_RING};
         border-radius: {RADIUS_PANEL}px;
     }}
+    /* 新 UI：提示卡拆成两种语义 —— 蓝色 HintCard 用于普通说明，
+       橙色 NoteCard 用于「注意 / 可能失败」类提醒（.note-card）。 */
+    QFrame#NoteCard {{
+        background: {WARN_SOFT};
+        border: 1px solid {WARN_BORDER};
+        border-radius: {RADIUS_PANEL}px;
+    }}
+    QFrame#NoteCard QLabel#CardTitle {{
+        color: {WARN};
+    }}
     QFrame#StatusCard,
     QFrame#PreviewCard,
     QFrame#ResultCard,
@@ -206,11 +230,15 @@ def build_stylesheet() -> str:
         font-size: 12px;
         font-weight: 600;
     }}
+    /* 新 UI：中性按钮的 hover 改为浅底 + 实描边（.btn:not(:disabled):hover）。
+       原来的半透明黑底叠在白卡片上几乎看不出反馈。 */
     QPushButton:hover {{
-        background: {NAV_HOVER};
+        background: {SURFACE_2};
+        border-color: {LINE_STRONG};
     }}
     QPushButton:pressed {{
-        background: {NAV_PRESSED};
+        background: {SURFACE_3};
+        border-color: {LINE_STRONG};
     }}
     QPushButton:disabled {{
         background: {SURFACE_2};
@@ -254,11 +282,13 @@ def build_stylesheet() -> str:
     }}
     QPushButton[variant="ghost"]:hover,
     QPushButton#SecondaryButton:hover {{
-        background: {NAV_HOVER};
+        background: {SURFACE_2};
+        border-color: {LINE_STRONG};
     }}
     QPushButton[variant="ghost"]:pressed,
     QPushButton#SecondaryButton:pressed {{
-        background: {NAV_PRESSED};
+        background: {SURFACE_3};
+        border-color: {LINE_STRONG};
     }}
     QPushButton[variant="soft"],
     QPushButton#SecondaryButton:checked {{
@@ -288,6 +318,39 @@ def build_stylesheet() -> str:
         border-color: {ERR_BORDER};
     }}
 
+    /* 新 UI：概览页标题栏的两个操作同属中性次要操作，统一成浅色语义，
+       不再用黑底主按钮把「开始框选」抬成整页主视觉（.overview-head-actions）。 */
+    QPushButton#OverviewHeadButton {{
+        background: {SURFACE};
+        color: {INK};
+        border-color: {LINE};
+    }}
+    QPushButton#OverviewHeadButton:hover {{
+        background: {SURFACE_2};
+        border-color: {LINE_STRONG};
+        color: {INK};
+    }}
+    QPushButton#OverviewHeadButton:pressed {{
+        background: {SURFACE_3};
+        border-color: {LINE_STRONG};
+    }}
+    /* 开关型按钮（剪贴板自动处理）的选中态：保留一档可见的浅底，
+       不然开/关两种状态在界面上完全一样。 */
+    QPushButton#OverviewHeadButton:checked {{
+        background: {SURFACE_2};
+        border-color: {LINE_STRONG};
+        color: {INK};
+    }}
+    QPushButton#OverviewHeadButton:checked:hover {{
+        background: {SURFACE_3};
+        border-color: {LINE_STRONG};
+    }}
+    QPushButton#OverviewHeadButton:disabled {{
+        background: {SURFACE_2};
+        color: {INK_5};
+        border-color: transparent;
+    }}
+
     /* 侧边栏导航项由 SidebarNavButton 自行绘制（图标 + 文字精确对齐），
        这里仅保留旧的设置导航样式。 */
     QPushButton#SettingsNavItem {{
@@ -308,20 +371,22 @@ def build_stylesheet() -> str:
         color: {BLUE};
         font-weight: 600;
     }}
+    /* 新 UI：收起按钮不再是“白底灰描边的圆把手”，而是侧边栏内右下角的
+       浅蓝胶囊按钮（.sidebar-toggle），常态就带蓝色语义，hover 只加深一档。 */
     QPushButton#SidebarToggle {{
-        min-width: {SIDEBAR_TOGGLE_SIZE}px;
-        max-width: {SIDEBAR_TOGGLE_SIZE}px;
-        min-height: {SIDEBAR_TOGGLE_SIZE}px;
-        max-height: {SIDEBAR_TOGGLE_SIZE}px;
+        min-width: {SIDEBAR_TOGGLE_WIDTH}px;
+        max-width: {SIDEBAR_TOGGLE_WIDTH}px;
+        min-height: {SIDEBAR_TOGGLE_HEIGHT}px;
+        max-height: {SIDEBAR_TOGGLE_HEIGHT}px;
         padding: 0px;
-        background: {SURFACE};
-        border: 1px solid {LINE_STRONG};
-        border-radius: {SIDEBAR_TOGGLE_SIZE // 2}px;
-        color: {INK_3};
+        background: {BLUE_SOFT};
+        border: 1px solid {BLUE_BORDER};
+        border-radius: {RADIUS_CONTROL}px;
+        color: {BLUE};
     }}
     QPushButton#SidebarToggle:hover {{
-        background: {BLUE_SOFT};
-        border-color: {BLUE};
+        background: {BLUE_SOFT_STRONG};
+        border-color: {BLUE_BORDER_HOVER};
         color: {BLUE};
     }}
     QPushButton#SidebarToggle:pressed {{

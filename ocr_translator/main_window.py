@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PyQt6.QtCore import (
     QEasingCurve,
+    QEvent,
     QPropertyAnimation,
     QSize,
     Qt,
@@ -40,7 +41,11 @@ from .theme import (
     CONTENT_MARGIN,
     NAV_ITEM_SPACING,
     SIDEBAR_COLLAPSED_WIDTH,
-    SIDEBAR_TOGGLE_SIZE,
+    SIDEBAR_TOGGLE_BOTTOM_MARGIN,
+    SIDEBAR_TOGGLE_HEIGHT,
+    SIDEBAR_TOGGLE_MARGIN,
+    SIDEBAR_TOGGLE_MARGIN_COLLAPSED,
+    SIDEBAR_TOGGLE_WIDTH,
     SIDEBAR_WIDTH,
     TOAST_BOTTOM_OFFSET,
     apply_window_theme,
@@ -137,6 +142,7 @@ class MainWindow(QMainWindow):
 
         content_card = QFrame()
         content_card.setObjectName("ContentCard")
+        self.content_card = content_card
         card_layout = QVBoxLayout(content_card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         card_layout.setSpacing(0)
@@ -155,9 +161,13 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(content_card)
         root_layout.addWidget(content_area, 1)
 
-        # 收起按钮垂直居中悬浮在侧边栏右侧边界上（抽屉把手样式），
-        # 因此不进入布局，而是手动定位。
-        self.sidebar_toggle_button = SidebarToggleButton(central)
+        # 新 UI：收起按钮固定在侧边栏内部的右下角，不再压在分隔线上。
+        # 它是侧边栏的浮层子控件（不进入布局），随侧边栏尺寸变化重新定位。
+        self.sidebar_toggle_button = SidebarToggleButton(self.sidebar)
+        # 按钮靠下对齐、提示条靠内容卡片对齐，而 QMainWindow.resizeEvent 触发时
+        # 子控件几何信息可能还是旧值，所以直接监听它们自己的 Resize 事件。
+        self.sidebar.installEventFilter(self)
+        self.content_card.installEventFilter(self)
         self._sidebar_animation = QVariantAnimation(self)
         self._sidebar_animation.setDuration(180)
         self._sidebar_animation.setEasingCurve(QEasingCurve.Type.OutCubic)
@@ -213,12 +223,21 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "sidebar_toggle_button"):
             return
         width = self.sidebar.width() if sidebar_width is None else int(sidebar_width)
-        # 水平：按钮圆心压在侧边栏右边界上；
-        # 垂直：随侧边栏全高居中（抽屉把手样式），不再与顶部品牌区拥挤，
-        # 收起后的窄栏也无需为按钮预留顶部空隙。
+        # 新 UI：按钮完全落在侧边栏内部的右下角（坐标相对侧边栏）。
+        # 展开时距右 16px，收起后窄栏只剩 52px，距右收到 8px 才能居中。
+        margin_right = (
+            SIDEBAR_TOGGLE_MARGIN_COLLAPSED
+            if self._is_sidebar_collapsed
+            else SIDEBAR_TOGGLE_MARGIN
+        )
         self.sidebar_toggle_button.move(
-            max(0, width - (SIDEBAR_TOGGLE_SIZE // 2)),
-            max(0, (self.sidebar.height() - SIDEBAR_TOGGLE_SIZE) // 2),
+            max(0, width - margin_right - SIDEBAR_TOGGLE_WIDTH),
+            max(
+                0,
+                self.sidebar.height()
+                - SIDEBAR_TOGGLE_BOTTOM_MARGIN
+                - SIDEBAR_TOGGLE_HEIGHT,
+            ),
         )
         self.sidebar_toggle_button.raise_()
 
@@ -335,13 +354,15 @@ class MainWindow(QMainWindow):
         page, layout = self._new_content_page()
 
         self.capture_button = QPushButton("开始框选")
-        self.capture_button.setProperty("variant", "primary")
+        # 新 UI：概览页标题栏的两个操作统一为中性浅色按钮（.overview-head-actions），
+        # 不再把「开始框选」做成黑底主按钮。
+        self.capture_button.setObjectName("OverviewHeadButton")
         self.capture_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.capture_button.setMinimumWidth(96)
         self.capture_button.setToolTip("打开截图选区工具")
 
         self.clipboard_button = QPushButton("剪贴板自动处理：已关闭")
-        self.clipboard_button.setObjectName("SecondaryButton")
+        self.clipboard_button.setObjectName("OverviewHeadButton")
         self.clipboard_button.setCheckable(True)
         self.clipboard_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clipboard_button.setToolTip("监控剪贴板中的图片并自动识别")
@@ -591,7 +612,9 @@ class MainWindow(QMainWindow):
         self.display_toggle_button.toggled.connect(self._update_display_status_text)
 
     def _setup_toast(self) -> None:
-        self._toast_label = QLabel(self)
+        # 新 UI：提示条挂在内容卡片上（.toast-host 位于 .content 内），
+        # 而不是整个窗口，因此不会再被侧边栏宽度拉偏。
+        self._toast_label = QLabel(self.content_card)
         self._toast_label.setObjectName("Toast")
         self._toast_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._toast_label.setWordWrap(False)
@@ -1048,7 +1071,7 @@ class MainWindow(QMainWindow):
     def update_ocr_result(self, text: str) -> None:
         # 完整渲染入口：占位提示、错误提示与最终结果都走这里。
         # 流式增量不再走此方法（见 append_ocr_stream_text），因此一次
-        # 请求中全文 Markdown ��析渲染只发生一次（请求结束时）。
+        # 请求中全文 Markdown 解析渲染只发生一次（请求结束时）。
         self._is_ocr_streaming = False
         self._ocr_stream_parts = []
         self._ocr_result_text = text.strip()
@@ -1202,9 +1225,11 @@ class MainWindow(QMainWindow):
         if not text:
             return
 
+        # 提示条以内容卡片为参系居中（坐标相对 content_card）。
+        card = self.content_card
         font_metrics = QFontMetrics(self._toast_label.font())
         horizontal_padding = 38
-        max_width = max(220, self.width() - 44)
+        max_width = max(220, card.width() - 44)
         preferred_width = font_metrics.horizontalAdvance(text) + horizontal_padding
         use_single_line = preferred_width <= max_width
         self._toast_label.setWordWrap(not use_single_line)
@@ -1213,10 +1238,10 @@ class MainWindow(QMainWindow):
         )
         self._toast_label.adjustSize()
 
-        x = max(22, (self.width() - self._toast_label.width()) // 2)
+        x = max(12, (card.width() - self._toast_label.width()) // 2)
         y = max(
-            22,
-            self.height() - self._toast_label.height() - TOAST_BOTTOM_OFFSET,
+            12,
+            card.height() - self._toast_label.height() - TOAST_BOTTOM_OFFSET,
         )
         self._toast_label.move(x, y)
 
@@ -1246,6 +1271,17 @@ class MainWindow(QMainWindow):
         self._toast_fade_in.setEndValue(1.0)
         self._toast_fade_in.start()
         self._toast_hide_timer.start(max(800, int(duration_ms)))
+
+    def eventFilter(self, watched, event) -> bool:
+        # 侧边栏收起按钮靠底对齐、提示条靠内容卡片居中，两者都依赖
+        # 宿主控件的最新几何尺寸，因此在宿主自身 Resize 时重算位置。
+        if event.type() == QEvent.Type.Resize:
+            if watched is getattr(self, "sidebar", None):
+                self._update_sidebar_toggle_position()
+            elif watched is getattr(self, "content_card", None):
+                if hasattr(self, "_toast_label") and self._toast_label.isVisible():
+                    self._update_toast_position()
+        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event) -> None:
         if hasattr(self, "preview_label") and not self._preview_source_pixmap.isNull():

@@ -397,7 +397,9 @@ class SettingsPages(QObject):
         layout.addWidget(self.refresh_shortcut_row)
 
         note = QFrame()
-        note.setObjectName("HintCard")
+        # 新 UI：「快捷键冲突」属于警示类提醒，改用橙色 NoteCard（.note-card），
+        # 与蓝色的普通说明卡 HintCard 区分开。
+        note.setObjectName("NoteCard")
         note_layout = QVBoxLayout(note)
         note_layout.setContentsMargins(14, 12, 14, 12)
         note_layout.setSpacing(4)

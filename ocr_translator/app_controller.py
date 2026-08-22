@@ -867,15 +867,16 @@ class AppController(QObject):
             thread.wait()
 
     def on_clipboard_monitor_toggled(self, checked: bool) -> None:
+        # 新 UI：概览页标题栏的按钮统一为中性浅色语义，开/关状态交给
+        # QSS 的 #OverviewHeadButton:checked 表现；这里不能再切 objectName，
+        # 否则会把主窗口设置的 OverviewHeadButton 冲掉，样式退回旧版。
         if checked:
             self.main_window.clipboard_button.setText("剪贴板自动处理：已开启")
-            self.main_window.clipboard_button.setObjectName("PrimaryButton")
             self._refresh_button_style(self.main_window.clipboard_button)
             self.translate_clipboard_image(force=True, show_no_image_error=True)
             return
 
         self.main_window.clipboard_button.setText("剪贴板自动处理：已关闭")
-        self.main_window.clipboard_button.setObjectName("SecondaryButton")
         self._refresh_button_style(self.main_window.clipboard_button)
 
     def on_display_visibility_toggled(self, checked: bool) -> None:

@@ -43,7 +43,8 @@ from .theme import (
     INK_3,
     NAV_ITEM_HEIGHT,
     RADIUS_CONTROL,
-    SIDEBAR_TOGGLE_SIZE,
+    SIDEBAR_TOGGLE_HEIGHT,
+    SIDEBAR_TOGGLE_WIDTH,
 )
 
 
@@ -656,7 +657,7 @@ class SidebarNavButton(QAbstractButton):
 
 
 class SidebarToggleButton(QPushButton):
-    """垂直居中悬浮在侧边栏右边界上的圆形收起/展开按钮（抽屉把手样式）。"""
+    """侧边栏右下角的收起/展开按钮（新 UI：36x34 浅蓝胶囊）。"""
 
     ICON_SIZE = 14
 
@@ -665,28 +666,18 @@ class SidebarToggleButton(QPushButton):
         self.setObjectName("SidebarToggle")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setFixedSize(SIDEBAR_TOGGLE_SIZE, SIDEBAR_TOGGLE_SIZE)
+        self.setFixedSize(SIDEBAR_TOGGLE_WIDTH, SIDEBAR_TOGGLE_HEIGHT)
         self.setIconSize(QSize(self.ICON_SIZE, self.ICON_SIZE))
 
         self._is_collapsed = False
-        self._is_hovered = False
         self.setCollapsed(False)
 
-    def enterEvent(self, event) -> None:
-        self._is_hovered = True
-        self._refresh_icon()
-        super().enterEvent(event)
-
-    def leaveEvent(self, event) -> None:
-        self._is_hovered = False
-        self._refresh_icon()
-        super().leaveEvent(event)
-
     def _refresh_icon(self) -> None:
-        # QSS 只能改文字颜色，图标颜色需要跟着 hover 手动切。
+        # 新 UI 的按钮本身就是蓝色语义（浅蓝底 + 蓝描边），
+        # 箭头常态即为蓝色，hover 只由 QSS 改底色，无需手动切图标。
         pixmap = _build_chevron_pixmap(
             pointing_left=not self._is_collapsed,
-            color=BLUE if self._is_hovered else INK_3,
+            color=BLUE,
             size=self.ICON_SIZE,
             ratio=self.devicePixelRatioF(),
         )
